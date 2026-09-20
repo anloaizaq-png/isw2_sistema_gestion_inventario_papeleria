@@ -1,0 +1,1 @@
+# isw2_sistema_inventario_papeleria
