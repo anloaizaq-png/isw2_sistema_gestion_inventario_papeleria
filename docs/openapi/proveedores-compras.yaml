@@ -1,0 +1,1148 @@
+openapi: 3.0.3
+
+info:
+  title: Cotton Cloud Paper - Microservicio de Proveedores y Compras
+  version: 1.1.0
+  description: |
+    Administra el abastecimiento de la papelería: proveedores, asociación
+    proveedor-producto, órdenes de compra, recepciones de mercancía y
+    devoluciones a proveedores.
+
+    Todas las rutas de negocio viven bajo `/api/compras`, el mismo prefijo que
+    usa el API Gateway, que reenvía la ruta completa sin modificarla. El
+    Gateway valida el JWT y agrega la cabecera `X-User-Id`.
+
+    **Referencias lógicas (sin llave foránea entre bases de datos):**
+    `producto_id` apunta a Productos, `usuario_id` a Usuarios y `bodega_id` a
+    Inventario.
+
+    **Integraciones:**
+    - Productos: valida que el producto exista y esté activo al asociarlo a un
+      proveedor o incluirlo en una orden.
+    - Inventario: cada recepción registra una `ENTRADA` y cada devolución a
+      proveedor una `SALIDA` mediante `POST /api/inventario/movimientos`, con
+      `referencia_tipo=COMPRA`, `referencia_id` igual al id de la orden y una
+      `idempotency_key` distinta por línea.
+    - Alertas y Analítica: provee las sugerencias de reabastecimiento y recibe
+      la marca de "atendida" cuando se crea la orden a partir de una sugerencia.
+
+    **Recepciones y devoluciones.** La recepción o la devolución se registra
+    primero en este servicio y luego se sincroniza con Inventario línea por
+    línea. Si Inventario no responde o rechaza una línea, esa línea queda en
+    `PENDIENTE` o `FALLIDA`, la respuesta es 202 y se puede reintentar con las
+    mismas llaves de idempotencia sin duplicar stock.
+
+    Las devoluciones a proveedores son distintas de las devoluciones de
+    clientes, que pertenecen a Ventas y Pedidos.
+
+    Las rutas `/health` son operativas y se restringen a la red del clúster.
+
+servers:
+  - url: http://localhost:5002
+    description: Desarrollo local (el contenedor escucha en 8080 y se publica en 5002)
+  - url: http://compras-service:8080
+    description: Dirección interna en Docker Compose y Kubernetes
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Proveedores
+    description: Registro, consulta y baja lógica de proveedores.
+  - name: Proveedor-Productos
+    description: Productos que suministra cada proveedor.
+  - name: Ordenes de compra
+    description: Creación, consulta, cancelación y sugerencias de órdenes.
+  - name: Recepciones
+    description: Recepción de mercancía y entrada en Inventario.
+  - name: Devoluciones a proveedor
+    description: Devoluciones de mercancía a proveedores y salida de Inventario.
+  - name: Infraestructura
+    description: Comprobaciones de disponibilidad.
+
+paths:
+  /api/compras/proveedores:
+    post:
+      tags: [Proveedores]
+      operationId: registrarProveedor
+      summary: Registrar un proveedor
+      description: El NIT debe ser único. El proveedor se crea en estado `activo`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProveedorEntrada'
+      responses:
+        '201':
+          description: Proveedor creado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Proveedor'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '422':
+          $ref: '#/components/responses/DatosInvalidos'
+        '503':
+          $ref: '#/components/responses/ServicioNoDisponible'
+    get:
+      tags: [Proveedores]
+      operationId: listarProveedores
+      summary: Listar proveedores
+      parameters:
+        - name: estado
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [activo, inactivo]
+        - name: nombre
+          in: query
+          required: false
+          description: Coincidencia parcial sin distinguir mayúsculas.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Proveedores que cumplen los filtros.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Proveedor'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '503':
+          $ref: '#/components/responses/ServicioNoDisponible'
+
+  /api/compras/proveedores/{proveedor_id}:
+    parameters:
+      - $ref: '#/components/parameters/ProveedorId'
+    get:
+      tags: [Proveedores]
+      operationId: consultarProveedor
+      summary: Consultar un proveedor por id
+      responses:
+        '200':
+          description: Proveedor encontrado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Proveedor'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+        '503':
+          $ref: '#/components/responses/ServicioNoDisponible'
+    put:
+      tags: [Proveedores]
+      operationId: actualizarProveedor
+      summary: Actualizar un proveedor
+      description: Reemplaza los datos editables. No modifica el estado ni la fecha de registro.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProveedorEntrada'
+      responses:
+        '200':
+          description: Proveedor actualizado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Proveedor'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+        '422':
+          $ref: '#/components/responses/DatosInvalidos'
+        '503':
+          $ref: '#/components/responses/ServicioNoDisponible'
+    delete:
+      tags: [Proveedores]
+      operationId: desactivarProveedor
+      summary: Desactivar un proveedor (baja lógica)
+      description: |
+        Cambia el estado a `inactivo` sin eliminar el registro. Es idempotente.
+        Responde 409 si el proveedor tiene órdenes en estado `pendiente` o
+        `recibida_parcial`.
+      responses:
+        '200':
+          description: Proveedor desactivado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Proveedor'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+        '409':
+          $ref: '#/components/responses/Conflicto'
+        '503':
+          $ref: '#/components/responses/ServicioNoDisponible'
+
+  /api/compras/proveedores/{proveedor_id}/productos:
+    parameters:
+      - $ref: '#/components/parameters/ProveedorId'
+    post:
+      tags: [Proveedor-Productos]
+      operationId: asociarProducto
+      summary: Asociar un producto a este proveedor
+      description: |
+        Valida en Productos que el producto exista y esté activo. Un mismo
+        producto no puede asociarse dos veces al mismo proveedor.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AsociarProductoRequest'
+      responses:
+        '201':
+          description: Producto asociado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProveedorProducto'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+        '409':
+          $ref: '#/components/responses/Conflicto'
+        '422':
+          $ref: '#/components/responses/DatosInvalidos'
+        '503':
+          $ref: '#/components/responses/ServicioNoDisponible'
+    get:
+      tags: [Proveedor-Productos]
+      operationId: listarProductosDeProveedor
+      summary: Listar los productos asociados a un proveedor
+      responses:
+        '200':
+          description: Asociaciones del proveedor.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ProveedorProducto'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+        '503':
+          $ref: '#/components/responses/ServicioNoDisponible'
+
+  /api/compras/proveedores/{proveedor_id}/productos/{producto_id}:
+    parameters:
+      - $ref: '#/components/parameters/ProveedorId'
+      - $ref: '#/components/parameters/ProductoId'
+    delete:
+      tags: [Proveedor-Productos]
+      operationId: desasociarProducto
+      summary: Quitar la asociación entre un proveedor y un producto
+      responses:
+        '204':
+          description: Asociación eliminada. Sin cuerpo de respuesta.
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+        '503':
+          $ref: '#/components/responses/ServicioNoDisponible'
+
+  /api/compras/ordenes-compra:
+    post:
+      tags: [Ordenes de compra]
+      operationId: crearOrdenCompra
+      summary: Crear una orden de compra
+      description: |
+        Valida que el proveedor exista y esté activo, y que cada producto exista
+        y esté activo en Productos. No se permiten productos repetidos en la
+        misma orden. El `total` se calcula en el servidor como la suma de
+        `cantidad * precio_unitario`. La orden se crea en estado `pendiente` y
+        guarda el usuario indicado en `X-User-Id`.
+
+        Si se envía `sugerencia_id`, el `origen` debe ser `alerta`. Tras crear
+        la orden se marca la sugerencia como atendida en Alertas y Analítica;
+        si esa llamada falla, la orden se conserva.
+      parameters:
+        - $ref: '#/components/parameters/UsuarioId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrdenCompraEntrada'
+      responses:
+        '201':
+          description: Orden creada.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrdenCompra'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '422':
+          $ref: '#/components/responses/DatosInvalidos'
+        '503':
+          $ref: '#/components/responses/ServicioNoDisponible'
+    get:
+      tags: [Ordenes de compra]
+      operationId: listarOrdenesCompra
+      summary: Listar órdenes de compra
+      parameters:
+        - name: estado
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/EstadoOrden'
+        - name: proveedor_id
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+      responses:
+        '200':
+          description: Órdenes que cumplen los filtros, con su detalle.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/OrdenCompra'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '422':
+          $ref: '#/components/responses/DatosInvalidos'
+        '503':
+          $ref: '#/components/responses/ServicioNoDisponible'
+
+  /api/compras/ordenes-compra/sugeridas:
+    get:
+      tags: [Ordenes de compra]
+      operationId: listarOrdenesSugeridas
+      summary: Consultar sugerencias de reabastecimiento
+      description: |
+        Devuelve las sugerencias en estado `pendiente` que genera Alertas y
+        Analítica. Para convertir una en orden se usa `POST /ordenes-compra`
+        con `origen=alerta` y su `sugerencia_id`.
+      responses:
+        '200':
+          description: Sugerencias pendientes.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Sugerencia'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '503':
+          $ref: '#/components/responses/ServicioNoDisponible'
+
+  /api/compras/ordenes-compra/{orden_id}:
+    parameters:
+      - $ref: '#/components/parameters/OrdenId'
+    get:
+      tags: [Ordenes de compra]
+      operationId: consultarOrdenCompra
+      summary: Consultar una orden de compra con su detalle
+      responses:
+        '200':
+          description: Orden encontrada.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrdenCompra'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+        '503':
+          $ref: '#/components/responses/ServicioNoDisponible'
+
+  /api/compras/ordenes-compra/{orden_id}/cancelar:
+    parameters:
+      - $ref: '#/components/parameters/OrdenId'
+    put:
+      tags: [Ordenes de compra]
+      operationId: cancelarOrdenCompra
+      summary: Cancelar una orden de compra
+      description: Solo se pueden cancelar órdenes en estado `pendiente`.
+      responses:
+        '200':
+          description: Orden cancelada.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrdenCompra'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+        '409':
+          $ref: '#/components/responses/Conflicto'
+        '503':
+          $ref: '#/components/responses/ServicioNoDisponible'
+
+  /api/compras/ordenes-compra/{orden_id}/recibir:
+    parameters:
+      - $ref: '#/components/parameters/OrdenId'
+    put:
+      tags: [Recepciones]
+      operationId: recibirOrdenCompra
+      summary: Registrar la recepción de mercancía
+      description: |
+        Valida que la orden esté en estado `pendiente` o `recibida_parcial`,
+        que cada producto pertenezca a la orden y que la cantidad no supere lo
+        que falta por recibir. Registra la recepción, incrementa
+        `cantidad_recibida` y deja la orden en `recibida_parcial` o
+        `recibida_total`. Luego registra una `ENTRADA` en Inventario por cada
+        línea.
+
+        Responde 200 si todas las líneas quedaron aplicadas en Inventario y 202
+        si alguna quedó pendiente o fallida; en ese caso se usa
+        `POST /recepciones/{recepcion_id}/reintentar`.
+      parameters:
+        - $ref: '#/components/parameters/UsuarioId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecibirRequest'
+      responses:
+        '200':
+          description: Recepción registrada y sincronizada con Inventario.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Recepcion'
+        '202':
+          description: Recepción registrada, con líneas pendientes en Inventario.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Recepcion'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+        '409':
+          $ref: '#/components/responses/Conflicto'
+        '422':
+          $ref: '#/components/responses/DatosInvalidos'
+        '503':
+          $ref: '#/components/responses/ServicioNoDisponible'
+
+  /api/compras/ordenes-compra/{orden_id}/recepciones:
+    parameters:
+      - $ref: '#/components/parameters/OrdenId'
+    get:
+      tags: [Recepciones]
+      operationId: listarRecepcionesDeOrden
+      summary: Listar las recepciones de una orden
+      responses:
+        '200':
+          description: Recepciones de la orden, de la más antigua a la más reciente.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Recepcion'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+        '503':
+          $ref: '#/components/responses/ServicioNoDisponible'
+
+  /api/compras/recepciones/{recepcion_id}/reintentar:
+    parameters:
+      - $ref: '#/components/parameters/RecepcionId'
+    post:
+      tags: [Recepciones]
+      operationId: reintentarRecepcion
+      summary: Reintentar la sincronización de una recepción con Inventario
+      description: |
+        Reenvía a Inventario las líneas que no están en `APLICADA`, con las
+        mismas `idempotency_key`, de modo que una línea ya aplicada nunca suma
+        dos veces. Es idempotente: si todo estaba aplicado, devuelve la
+        recepción sin cambios.
+      responses:
+        '200':
+          description: Todas las líneas están aplicadas en Inventario.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Recepcion'
+        '202':
+          description: Todavía quedan líneas pendientes o fallidas.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Recepcion'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+        '503':
+          $ref: '#/components/responses/ServicioNoDisponible'
+
+  /api/compras/devoluciones-proveedor:
+    post:
+      tags: [Devoluciones a proveedor]
+      operationId: registrarDevolucionProveedor
+      summary: Registrar una devolución a proveedor
+      description: |
+        Solo aplica a órdenes en estado `recibida_parcial` o `recibida_total`
+        (409 en otro caso). Por cada producto, la cantidad no puede superar
+        `cantidad_recibida - cantidad_devuelta` (422). Registra la devolución,
+        incrementa `cantidad_devuelta` y registra una `SALIDA` en Inventario
+        por cada línea.
+
+        Responde 201 si todas las líneas quedaron aplicadas en Inventario y 202
+        si alguna quedó pendiente o fallida (por ejemplo, por stock
+        insuficiente); en ese caso se usa
+        `POST /devoluciones-proveedor/{devolucion_id}/reintentar`.
+      parameters:
+        - $ref: '#/components/parameters/UsuarioId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DevolucionProveedorEntrada'
+      responses:
+        '201':
+          description: Devolución registrada y sincronizada con Inventario.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DevolucionProveedor'
+        '202':
+          description: Devolución registrada, con líneas pendientes en Inventario.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DevolucionProveedor'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+        '409':
+          $ref: '#/components/responses/Conflicto'
+        '422':
+          $ref: '#/components/responses/DatosInvalidos'
+        '503':
+          $ref: '#/components/responses/ServicioNoDisponible'
+    get:
+      tags: [Devoluciones a proveedor]
+      operationId: listarDevolucionesProveedor
+      summary: Listar devoluciones a proveedores
+      parameters:
+        - name: orden_compra_id
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+        - name: proveedor_id
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+      responses:
+        '200':
+          description: Devoluciones que cumplen los filtros.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DevolucionProveedor'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '422':
+          $ref: '#/components/responses/DatosInvalidos'
+        '503':
+          $ref: '#/components/responses/ServicioNoDisponible'
+
+  /api/compras/devoluciones-proveedor/{devolucion_id}:
+    parameters:
+      - $ref: '#/components/parameters/DevolucionId'
+    get:
+      tags: [Devoluciones a proveedor]
+      operationId: consultarDevolucionProveedor
+      summary: Consultar una devolución a proveedor
+      responses:
+        '200':
+          description: Devolución encontrada.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DevolucionProveedor'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+        '503':
+          $ref: '#/components/responses/ServicioNoDisponible'
+
+  /api/compras/devoluciones-proveedor/{devolucion_id}/reintentar:
+    parameters:
+      - $ref: '#/components/parameters/DevolucionId'
+    post:
+      tags: [Devoluciones a proveedor]
+      operationId: reintentarDevolucionProveedor
+      summary: Reintentar la sincronización de una devolución con Inventario
+      description: |
+        Reenvía a Inventario las líneas que no están en `APLICADA`, con las
+        mismas `idempotency_key`. Es idempotente.
+      responses:
+        '200':
+          description: Todas las líneas están aplicadas en Inventario.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DevolucionProveedor'
+        '202':
+          description: Todavía quedan líneas pendientes o fallidas.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DevolucionProveedor'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+        '503':
+          $ref: '#/components/responses/ServicioNoDisponible'
+
+  /health/live:
+    get:
+      tags: [Infraestructura]
+      operationId: comprobarProceso
+      summary: Comprobar que el proceso está activo
+      description: Restringido a la red del clúster. No consulta la base de datos.
+      security: []
+      responses:
+        '200':
+          description: Proceso activo.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SaludResponse'
+              example:
+                estado: ok
+  /health/ready:
+    get:
+      tags: [Infraestructura]
+      operationId: comprobarDisponibilidad
+      summary: Comprobar disponibilidad para atender solicitudes
+      description: Restringido a la red del clúster. Comprueba la conexión a la base de datos de compras.
+      security: []
+      responses:
+        '200':
+          description: Servicio y base de datos disponibles.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SaludResponse'
+              example:
+                estado: ok
+        '503':
+          description: Base de datos no disponible.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SaludResponse'
+              example:
+                estado: no_disponible
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Access token emitido por el módulo Usuarios. El API Gateway lo valida
+        antes de reenviar la solicitud. Este servicio reenvía el mismo token a
+        Inventario, Productos y Alertas y Analítica.
+
+  parameters:
+    ProveedorId:
+      name: proveedor_id
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+    ProductoId:
+      name: producto_id
+      in: path
+      required: true
+      description: Identificador del producto en el microservicio Productos.
+      schema:
+        type: integer
+        minimum: 1
+    OrdenId:
+      name: orden_id
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+    RecepcionId:
+      name: recepcion_id
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+    DevolucionId:
+      name: devolucion_id
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+    UsuarioId:
+      name: X-User-Id
+      in: header
+      required: false
+      description: |
+        Identificador del usuario autenticado, agregado por el API Gateway. Si
+        no llega, el servicio toma el claim `sub` del JWT. Si tampoco existe,
+        responde 401.
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+
+  schemas:
+    EstadoOrden:
+      type: string
+      enum: [pendiente, recibida_parcial, recibida_total, cancelada]
+
+    EstadoInventarioLinea:
+      type: string
+      enum: [PENDIENTE, APLICADA, FALLIDA]
+      description: |
+        PENDIENTE: aún no se envió a Inventario. APLICADA: Inventario registró
+        el movimiento. FALLIDA: Inventario no respondió o lo rechazó.
+
+    ProveedorEntrada:
+      type: object
+      required: [nombre, nit]
+      properties:
+        nombre:
+          type: string
+          minLength: 1
+          maxLength: 150
+          example: Distribuidora Papelera S.A.S
+        nit:
+          type: string
+          minLength: 1
+          maxLength: 30
+          description: NIT único del proveedor.
+          example: 900123456-7
+        contacto_nombre:
+          type: string
+          maxLength: 150
+          nullable: true
+        telefono:
+          type: string
+          maxLength: 30
+          nullable: true
+        email:
+          type: string
+          format: email
+          maxLength: 150
+          nullable: true
+        direccion:
+          type: string
+          maxLength: 200
+          nullable: true
+
+    Proveedor:
+      allOf:
+        - type: object
+          required: [id, estado, fecha_registro]
+          properties:
+            id:
+              type: integer
+              format: int64
+              example: 7
+            estado:
+              type: string
+              enum: [activo, inactivo]
+            fecha_registro:
+              type: string
+              format: date-time
+        - $ref: '#/components/schemas/ProveedorEntrada'
+
+    AsociarProductoRequest:
+      type: object
+      required: [producto_id]
+      properties:
+        producto_id:
+          type: integer
+          minimum: 1
+          description: Referencia lógica a Productos; no es llave foránea.
+          example: 15
+
+    ProveedorProducto:
+      type: object
+      required: [id, proveedor_id, producto_id, fecha_asociacion]
+      properties:
+        id:
+          type: integer
+          format: int64
+        proveedor_id:
+          type: integer
+          format: int64
+        producto_id:
+          type: integer
+          description: Referencia lógica a Productos; no es llave foránea.
+        fecha_asociacion:
+          type: string
+          format: date-time
+
+    LineaOrdenEntrada:
+      type: object
+      required: [producto_id, cantidad, precio_unitario]
+      properties:
+        producto_id:
+          type: integer
+          minimum: 1
+          description: Referencia lógica a Productos; no es llave foránea.
+        cantidad:
+          type: integer
+          minimum: 1
+        precio_unitario:
+          type: number
+          minimum: 0
+          maximum: 9999999999.99
+          multipleOf: 0.01
+          description: Precio de compra acordado con el proveedor.
+
+    OrdenCompraEntrada:
+      type: object
+      required: [proveedor_id, productos]
+      properties:
+        proveedor_id:
+          type: integer
+          format: int64
+          minimum: 1
+          description: FK real a proveedores (misma base de datos).
+        origen:
+          type: string
+          enum: [manual, alerta]
+          default: manual
+        sugerencia_id:
+          type: integer
+          minimum: 1
+          nullable: true
+          description: |
+            Sugerencia de Alertas y Analítica que origina la orden. Solo se
+            admite con `origen=alerta`.
+        productos:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/LineaOrdenEntrada'
+
+    LineaOrden:
+      type: object
+      required: [producto_id, cantidad_solicitada, cantidad_recibida, cantidad_devuelta, precio_unitario]
+      properties:
+        producto_id:
+          type: integer
+        cantidad_solicitada:
+          type: integer
+        cantidad_recibida:
+          type: integer
+        cantidad_devuelta:
+          type: integer
+          description: Unidades recibidas que se devolvieron al proveedor.
+        precio_unitario:
+          type: number
+
+    OrdenCompra:
+      type: object
+      required: [id, proveedor_id, fecha_creacion, estado, origen, total, productos]
+      properties:
+        id:
+          type: integer
+          format: int64
+        proveedor_id:
+          type: integer
+          format: int64
+        usuario_id:
+          type: integer
+          format: int64
+          nullable: true
+          description: Referencia lógica a Usuarios; no es llave foránea.
+        fecha_creacion:
+          type: string
+          format: date-time
+        estado:
+          $ref: '#/components/schemas/EstadoOrden'
+        origen:
+          type: string
+          enum: [manual, alerta]
+        total:
+          type: number
+          description: Suma de cantidad_solicitada * precio_unitario.
+        productos:
+          type: array
+          items:
+            $ref: '#/components/schemas/LineaOrden'
+
+    RecibirRequest:
+      type: object
+      required: [bodega_id, productos_recibidos]
+      properties:
+        bodega_id:
+          type: integer
+          minimum: 1
+          description: Bodega de Inventario donde ingresa la mercancía.
+        productos_recibidos:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [producto_id, cantidad]
+            properties:
+              producto_id:
+                type: integer
+                minimum: 1
+              cantidad:
+                type: integer
+                minimum: 1
+
+    LineaMovimiento:
+      type: object
+      required: [producto_id, cantidad, estado_inventario, idempotency_key]
+      properties:
+        producto_id:
+          type: integer
+        cantidad:
+          type: integer
+        estado_inventario:
+          $ref: '#/components/schemas/EstadoInventarioLinea'
+        idempotency_key:
+          type: string
+          format: uuid
+          description: Llave enviada a Inventario para esta línea.
+
+    Recepcion:
+      type: object
+      required: [id, orden_compra_id, bodega_id, fecha, inventario_sincronizado, orden_estado, lineas]
+      properties:
+        id:
+          type: integer
+          format: int64
+        orden_compra_id:
+          type: integer
+          format: int64
+        bodega_id:
+          type: integer
+        usuario_id:
+          type: integer
+          format: int64
+          nullable: true
+        fecha:
+          type: string
+          format: date-time
+        inventario_sincronizado:
+          type: boolean
+          description: Verdadero si todas las líneas están en APLICADA.
+        orden_estado:
+          $ref: '#/components/schemas/EstadoOrden'
+        lineas:
+          type: array
+          items:
+            $ref: '#/components/schemas/LineaMovimiento'
+
+    DevolucionProveedorEntrada:
+      type: object
+      required: [orden_compra_id, bodega_id, motivo, productos]
+      properties:
+        orden_compra_id:
+          type: integer
+          format: int64
+          minimum: 1
+        bodega_id:
+          type: integer
+          minimum: 1
+          description: Bodega de Inventario de donde sale la mercancía.
+        motivo:
+          type: string
+          minLength: 1
+          maxLength: 255
+          example: Producto recibido con defecto de fábrica
+        productos:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [producto_id, cantidad]
+            properties:
+              producto_id:
+                type: integer
+                minimum: 1
+              cantidad:
+                type: integer
+                minimum: 1
+
+    DevolucionProveedor:
+      type: object
+      required: [id, orden_compra_id, proveedor_id, bodega_id, motivo, fecha, inventario_sincronizado, lineas]
+      properties:
+        id:
+          type: integer
+          format: int64
+        orden_compra_id:
+          type: integer
+          format: int64
+        proveedor_id:
+          type: integer
+          format: int64
+        bodega_id:
+          type: integer
+        usuario_id:
+          type: integer
+          format: int64
+          nullable: true
+        motivo:
+          type: string
+        fecha:
+          type: string
+          format: date-time
+        inventario_sincronizado:
+          type: boolean
+          description: Verdadero si todas las líneas están en APLICADA.
+        lineas:
+          type: array
+          items:
+            $ref: '#/components/schemas/LineaMovimiento'
+
+    Sugerencia:
+      type: object
+      properties:
+        id:
+          type: integer
+        alerta_id:
+          type: integer
+        producto_id:
+          type: integer
+        proveedor_id:
+          type: integer
+          nullable: true
+        cantidad_sugerida:
+          type: integer
+        estado:
+          type: string
+          enum: [pendiente, atendida]
+        orden_compra_id:
+          type: integer
+          nullable: true
+
+    SaludResponse:
+      type: object
+      required: [estado]
+      properties:
+        estado:
+          type: string
+          enum: [ok, no_disponible]
+
+    ErrorResponse:
+      type: object
+      required: [codigo, mensaje, requestId]
+      properties:
+        codigo:
+          type: string
+          example: DATOS_INVALIDOS
+        mensaje:
+          type: string
+          example: La solicitud contiene datos inválidos.
+        requestId:
+          type: string
+          description: Identificador de trazabilidad de la solicitud.
+          example: req-000125
+
+  responses:
+    DatosInvalidos:
+      description: |
+        Datos inválidos o regla de validación incumplida (NIT duplicado,
+        producto inexistente o inactivo, cantidad mayor a la permitida).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            codigo: NIT_DUPLICADO
+            mensaje: Ya existe un proveedor con el NIT indicado.
+            requestId: req-000125
+    NoAutenticado:
+      description: Token ausente, sesión inválida o usuario no identificable.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            codigo: NO_AUTENTICADO
+            mensaje: Las credenciales o la sesión no son válidas.
+            requestId: req-000125
+    NoEncontrado:
+      description: El recurso solicitado no existe.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            codigo: RECURSO_NO_ENCONTRADO
+            mensaje: El recurso solicitado no existe.
+            requestId: req-000125
+    Conflicto:
+      description: |
+        La operación no es válida en el estado actual (orden cancelada o
+        cerrada, proveedor con órdenes abiertas, producto ya asociado).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            codigo: ORDEN_CERRADA
+            mensaje: La orden no admite más recepciones.
+            requestId: req-000125
+    ServicioNoDisponible:
+      description: |
+        La base de datos u otra dependencia necesaria (Productos o Alertas) no
+        está disponible.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            codigo: SERVICIO_NO_DISPONIBLE
+            mensaje: El servicio no está disponible temporalmente.
+            requestId: req-000125
