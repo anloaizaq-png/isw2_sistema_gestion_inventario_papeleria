@@ -46,3 +46,6 @@ htmlcov/
 .vscode/
 .idea/
 .DS_Store
+
+# Especificaciones internas temporales
+docs/GATEWAY_SPEC.md
