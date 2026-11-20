@@ -2,52 +2,32 @@
 
 const http = require('http');
 const config = require('./config');
-const { getPool, closePool } = require('./db/connection');
+const { closePool } = require('./db/connection');
 const { initDatabase } = require('./db/initDb');
+const { dispatch } = require('./router');
 
 /**
- * Manejador principal de peticiones HTTP en Node.js nativo
- */
-function handleRequest(req, res) {
-  // Manejo de cabeceras comunes
-  res.setHeader('X-Powered-By', 'Cotton-Cloud-Gateway');
-
-  const parsedUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-  const pathname = parsedUrl.pathname;
-
-  // Endpoint de salud (Health Check)
-  if (pathname === '/health' && req.method === 'GET') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-      status: 'UP',
-      service: 'gateway-service',
-      environment: config.env,
-      timestamp: new Date().toISOString()
-    }));
-    return;
-  }
-
-  // Respuesta temporal para rutas aún no conectadas en el Paso 1
-  res.writeHead(404, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({
-    error: 'NotFound',
-    message: `Ruta ${req.method} ${pathname} no encontrada en gateway-service`,
-    timestamp: new Date().toISOString()
-  }));
-}
-
-/**
- * Inicializa y levanta el servidor HTTP nativo
+ * Punto de entrada del microservicio Gateway y Servicio de Identidad
  */
 async function startServer() {
-  const server = http.createServer(handleRequest);
+  const server = http.createServer((req, res) => {
+    dispatch(req, res).catch(err => {
+      console.error('[GATEWAY] Error no capturado en la petición:', err);
+      if (!res.headersSent) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          status: 'error',
+          error: 'InternalServerError',
+          message: 'Ocurrió un error interno no controlado'
+        }));
+      }
+    });
+  });
 
-  // Intentar inicializar esquema y seed de base de datos en segundo plano
-  try {
-    await initDatabase();
-  } catch (err) {
-    console.warn(`[SERVER] Inicialización de BD pendiente o diferida: ${err.message}`);
-  }
+  // Intentar inicialización de la BD en segundo plano (reintenta hasta conectar con MySQL)
+  initDatabase().catch(err => {
+    console.warn(`[SERVER] Inicialización de BD diferida o en espera: ${err.message}`);
+  });
 
   server.listen(config.port, '0.0.0.0', () => {
     console.log(`[GATEWAY] gateway-service escuchando en el puerto ${config.port} (Modo: ${config.env})`);
@@ -55,18 +35,17 @@ async function startServer() {
 
   // Apagado ordenado (Graceful Shutdown)
   const shutdown = async (signal) => {
-    console.log(`[GATEWAY] Señal ${signal} recibida, cerrando servidor...`);
+    console.log(`[GATEWAY] Señal ${signal} recibida, procediendo a apagar el servidor...`);
     server.close(async () => {
       console.log('[GATEWAY] Servidor HTTP cerrado.');
       await closePool();
       process.exit(0);
     });
 
-    // Forzar salida si tarda más de 5 segundos
     setTimeout(() => {
-      console.error('[GATEWAY] Cierre forzado por tiempo límite excedido.');
+      console.error('[GATEWAY] Apagado forzado por tiempo límite excedido.');
       process.exit(1);
-    }, 5000);
+    }, 5000).unref();
   };
 
   process.on('SIGTERM', () => shutdown('SIGTERM'));
@@ -81,6 +60,5 @@ if (require.main === module) {
 }
 
 module.exports = {
-  startServer,
-  handleRequest
+  startServer
 };
