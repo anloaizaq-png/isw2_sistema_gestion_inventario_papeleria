@@ -1,0 +1,441 @@
+openapi: 3.0.3
+info:
+  title: Microservicio de Alertas y analítica - Cotton Cloud Paper
+  version: 1.0.0
+  description: >
+    Genera alertas de bajo inventario mediante reglas configurables (sin IA),
+    calcula rotación, clasificación A/B/C y sugerencias de reabastecimiento.
+    Se accede únicamente a través del API Gateway (prefijo /api/alertas/).
+    Consume Inventario (stock actual) y Ventas y pedidos (historial de ventas).
+    Proveedores y compras consume las sugerencias de reabastecimiento.
+servers:
+  - url: http://localhost:8080
+    description: API Gateway (desarrollo)
+security:
+  - bearerAuth: []
+tags:
+  - name: Alertas
+  - name: Umbrales
+  - name: Temporadas
+  - name: Analitica
+  - name: Reabastecimiento
+
+paths:
+  /api/alertas/:
+    get:
+      tags: [Alertas]
+      summary: Listar alertas
+      parameters:
+        - { name: estado, in: query, schema: { $ref: '#/components/schemas/EstadoAlerta' } }
+        - { name: tipo, in: query, schema: { $ref: '#/components/schemas/TipoAlerta' } }
+        - { name: producto_id, in: query, schema: { type: integer } }
+        - { name: pagina, in: query, schema: { type: integer, default: 1 } }
+        - { name: limite, in: query, schema: { type: integer, default: 20 } }
+      responses:
+        '200':
+          description: Lista paginada de alertas
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total: { type: integer }
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Alerta' }
+        '401': { $ref: '#/components/responses/NoAutenticado' }
+  /api/alertas/{id}:
+    get:
+      tags: [Alertas]
+      summary: Consultar una alerta
+      parameters: [ { $ref: '#/components/parameters/Id' } ]
+      responses:
+        '200':
+          description: Alerta encontrada
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Alerta' }
+        '401': { $ref: '#/components/responses/NoAutenticado' }
+        '404': { $ref: '#/components/responses/NoEncontrado' }
+  /api/alertas/{id}/estado:
+    patch:
+      tags: [Alertas]
+      summary: Cambiar el estado de una alerta (pendiente, en gestión, atendida, descartada)
+      parameters: [ { $ref: '#/components/parameters/Id' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [estado]
+              properties:
+                estado: { $ref: '#/components/schemas/EstadoAlerta' }
+      responses:
+        '200':
+          description: Estado actualizado
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Alerta' }
+        '400': { $ref: '#/components/responses/Invalida' }
+        '401': { $ref: '#/components/responses/NoAutenticado' }
+        '403': { $ref: '#/components/responses/SinPermiso' }
+        '404': { $ref: '#/components/responses/NoEncontrado' }
+  /api/alertas/evaluar:
+    post:
+      tags: [Alertas]
+      summary: Evaluar el stock actual contra los umbrales y generar alertas
+      description: Consulta a Inventario el stock vigente y aplica umbral y multiplicador de temporada.
+      responses:
+        '200':
+          description: Resultado de la evaluación
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  productos_evaluados: { type: integer }
+                  alertas_generadas: { type: integer }
+        '401': { $ref: '#/components/responses/NoAutenticado' }
+        '403': { $ref: '#/components/responses/SinPermiso' }
+        '503':
+          description: Inventario no disponible
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/alertas/umbrales:
+    get:
+      tags: [Umbrales]
+      summary: Listar umbrales de stock mínimo
+      responses:
+        '200':
+          description: Lista de umbrales
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Umbral' }
+        '401': { $ref: '#/components/responses/NoAutenticado' }
+    post:
+      tags: [Umbrales]
+      summary: Crear umbral de stock mínimo
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UmbralEntrada' }
+      responses:
+        '201':
+          description: Umbral creado
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Umbral' }
+        '400': { $ref: '#/components/responses/Invalida' }
+        '401': { $ref: '#/components/responses/NoAutenticado' }
+        '403': { $ref: '#/components/responses/SinPermiso' }
+  /api/alertas/umbrales/{id}:
+    put:
+      tags: [Umbrales]
+      summary: Actualizar umbral
+      parameters: [ { $ref: '#/components/parameters/Id' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UmbralEntrada' }
+      responses:
+        '200':
+          description: Umbral actualizado
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Umbral' }
+        '400': { $ref: '#/components/responses/Invalida' }
+        '404': { $ref: '#/components/responses/NoEncontrado' }
+    delete:
+      tags: [Umbrales]
+      summary: Desactivar umbral
+      parameters: [ { $ref: '#/components/parameters/Id' } ]
+      responses:
+        '204': { description: Umbral desactivado }
+        '404': { $ref: '#/components/responses/NoEncontrado' }
+
+  /api/alertas/temporadas:
+    get:
+      tags: [Temporadas]
+      summary: Listar temporadas y multiplicadores
+      responses:
+        '200':
+          description: Lista de temporadas
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Temporada' }
+    post:
+      tags: [Temporadas]
+      summary: Crear temporada (por ejemplo, regreso a clases)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TemporadaEntrada' }
+      responses:
+        '201':
+          description: Temporada creada
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Temporada' }
+        '400': { $ref: '#/components/responses/Invalida' }
+        '403': { $ref: '#/components/responses/SinPermiso' }
+  /api/alertas/temporadas/{id}:
+    put:
+      tags: [Temporadas]
+      summary: Actualizar temporada
+      parameters: [ { $ref: '#/components/parameters/Id' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TemporadaEntrada' }
+      responses:
+        '200':
+          description: Temporada actualizada
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Temporada' }
+        '404': { $ref: '#/components/responses/NoEncontrado' }
+    delete:
+      tags: [Temporadas]
+      summary: Eliminar temporada
+      parameters: [ { $ref: '#/components/parameters/Id' } ]
+      responses:
+        '204': { description: Temporada eliminada }
+        '404': { $ref: '#/components/responses/NoEncontrado' }
+
+  /api/alertas/analitica/rotacion:
+    get:
+      tags: [Analitica]
+      summary: Rotación de productos (alta, media, baja)
+      parameters:
+        - { name: desde, in: query, required: true, schema: { type: string, format: date } }
+        - { name: hasta, in: query, required: true, schema: { type: string, format: date } }
+        - { name: nivel, in: query, schema: { type: string, enum: [alta, media, baja] } }
+      responses:
+        '200':
+          description: Rotación por producto
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Rotacion' }
+        '400': { $ref: '#/components/responses/Invalida' }
+        '401': { $ref: '#/components/responses/NoAutenticado' }
+  /api/alertas/analitica/clasificacion-abc:
+    get:
+      tags: [Analitica]
+      summary: Clasificación A, B o C de productos
+      responses:
+        '200':
+          description: Clasificación vigente
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ClasificacionAbc' }
+  /api/alertas/analitica/proximos-agotarse:
+    get:
+      tags: [Analitica]
+      summary: Productos próximos a agotarse
+      responses:
+        '200':
+          description: Productos con stock cercano al umbral
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ProductoEnRiesgo' }
+  /api/alertas/analitica/sin-movimiento:
+    get:
+      tags: [Analitica]
+      summary: Productos sin movimiento en un período
+      parameters:
+        - { name: dias, in: query, schema: { type: integer, default: 90 } }
+      responses:
+        '200':
+          description: Productos sin ventas en el período
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ProductoEnRiesgo' }
+  /api/alertas/analitica/demanda-temporada:
+    get:
+      tags: [Analitica]
+      summary: Productos con mayor demanda durante una temporada
+      parameters:
+        - { name: temporada_id, in: query, required: true, schema: { type: integer } }
+      responses:
+        '200':
+          description: Productos más demandados en la temporada
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Rotacion' }
+        '404': { $ref: '#/components/responses/NoEncontrado' }
+
+  /api/alertas/sugerencias-reabastecimiento:
+    get:
+      tags: [Reabastecimiento]
+      summary: Sugerencias de reabastecimiento (consumida por Proveedores y compras)
+      parameters:
+        - { name: estado, in: query, schema: { type: string, enum: [pendiente, atendida] } }
+      responses:
+        '200':
+          description: Lista de sugerencias
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Sugerencia' }
+        '401': { $ref: '#/components/responses/NoAutenticado' }
+  /api/alertas/sugerencias-reabastecimiento/{id}/estado:
+    patch:
+      tags: [Reabastecimiento]
+      summary: Marcar una sugerencia como atendida (cuando se genera la orden de compra)
+      parameters: [ { $ref: '#/components/parameters/Id' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [estado]
+              properties:
+                estado: { type: string, enum: [pendiente, atendida] }
+                orden_compra_id: { type: integer, description: 'Referencia lógica, sin llave foránea' }
+      responses:
+        '200':
+          description: Sugerencia actualizada
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Sugerencia' }
+        '404': { $ref: '#/components/responses/NoEncontrado' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: { type: integer }
+  responses:
+    NoAutenticado:
+      description: Token ausente o inválido
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    SinPermiso:
+      description: El rol no tiene permiso para esta operación
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NoEncontrado:
+      description: Recurso no encontrado
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Invalida:
+      description: Datos de entrada inválidos
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+  schemas:
+    Error:
+      type: object
+      properties:
+        codigo: { type: integer }
+        mensaje: { type: string }
+    EstadoAlerta:
+      type: string
+      enum: [pendiente, en_gestion, atendida, descartada]
+    TipoAlerta:
+      type: string
+      enum: [stock_bajo, agotado, sin_movimiento]
+    Alerta:
+      type: object
+      properties:
+        id: { type: integer }
+        producto_id: { type: integer, description: Referencia lógica a Productos }
+        tipo: { $ref: '#/components/schemas/TipoAlerta' }
+        estado: { $ref: '#/components/schemas/EstadoAlerta' }
+        stock_actual: { type: integer }
+        umbral_aplicado: { type: integer }
+        multiplicador_aplicado: { type: number, format: float }
+        fecha_generacion: { type: string, format: date-time }
+        fecha_atencion: { type: string, format: date-time, nullable: true }
+        usuario_atencion_id: { type: integer, nullable: true, description: Referencia lógica a los usuarios del API Gateway }
+    UmbralEntrada:
+      type: object
+      required: [producto_id, stock_minimo]
+      properties:
+        producto_id: { type: integer }
+        bodega_id: { type: integer, nullable: true }
+        stock_minimo: { type: integer, minimum: 0 }
+        activo: { type: boolean, default: true }
+    Umbral:
+      allOf:
+        - $ref: '#/components/schemas/UmbralEntrada'
+        - type: object
+          properties:
+            id: { type: integer }
+    TemporadaEntrada:
+      type: object
+      required: [nombre, fecha_inicio, fecha_fin, multiplicador]
+      properties:
+        nombre: { type: string, example: Regreso a clases }
+        fecha_inicio: { type: string, format: date }
+        fecha_fin: { type: string, format: date }
+        multiplicador: { type: number, format: float, minimum: 1, example: 1.5 }
+    Temporada:
+      allOf:
+        - $ref: '#/components/schemas/TemporadaEntrada'
+        - type: object
+          properties:
+            id: { type: integer }
+    Rotacion:
+      type: object
+      properties:
+        producto_id: { type: integer }
+        unidades_vendidas: { type: integer }
+        indice_rotacion: { type: number, format: float }
+        nivel: { type: string, enum: [alta, media, baja] }
+    ClasificacionAbc:
+      type: object
+      properties:
+        producto_id: { type: integer }
+        categoria: { type: string, enum: [A, B, C] }
+        periodo_calculo: { type: string, example: 2026-09 }
+    ProductoEnRiesgo:
+      type: object
+      properties:
+        producto_id: { type: integer }
+        stock_actual: { type: integer }
+        stock_minimo: { type: integer }
+        dias_sin_movimiento: { type: integer, nullable: true }
+    Sugerencia:
+      type: object
+      properties:
+        id: { type: integer }
+        alerta_id: { type: integer }
+        producto_id: { type: integer }
+        proveedor_id: { type: integer, nullable: true, description: Referencia lógica a Proveedores y compras }
+        cantidad_sugerida: { type: integer }
+        estado: { type: string, enum: [pendiente, atendida] }
+        orden_compra_id: { type: integer, nullable: true }
