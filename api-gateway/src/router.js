@@ -4,6 +4,7 @@ const config = require('./config');
 const { handleAuthRoutes } = require('./routes/authRoutes');
 const { handleUserRoutes } = require('./routes/userRoutes');
 const { handleRoleRoutes } = require('./routes/roleRoutes');
+const { handleProxyRoutes } = require('./routes/proxyRoutes');
 const { sendJson, sendError, getRequestId } = require('./utils/http');
 
 /**
@@ -40,12 +41,12 @@ async function dispatch(req, res) {
     });
   }
 
-  // 1. Enrutamiento hacia módulo de Autenticación (/api/auth/*)
+  // 1. Enrutamiento hacia módulo interno de Autenticación (/api/auth/*)
   if (pathname.startsWith('/api/auth/')) {
     return handleAuthRoutes(req, res, pathname);
   }
 
-  // 2. Enrutamiento hacia módulo de Usuarios (/api/usuarios)
+  // 2. Enrutamiento hacia módulo interno de Usuarios (/api/usuarios)
   if (pathname === '/api/usuarios' || pathname.startsWith('/api/usuarios/')) {
     return handleUserRoutes(req, res, pathname, searchParams);
   }
@@ -55,8 +56,15 @@ async function dispatch(req, res) {
     return handleRoleRoutes(req, res, pathname);
   }
 
-  // Ruta no encontrada en el gateway
-  sendError(res, 404, 'NotFound', `Ruta ${req.method} ${pathname} no encontrada`);
+  // 4. Enrutamiento hacia Microservicios Destino (Reverse Proxy con Streams y RBAC)
+  // Cubre /api/productos, /api/inventario, /api/ventas, /api/compras, /api/alertas
+  const proxied = await handleProxyRoutes(req, res, pathname);
+  if (proxied) {
+    return;
+  }
+
+  // Ruta no encontrada en ninguna de las definiciones
+  sendError(res, 404, 'NotFound', `Ruta ${req.method} ${pathname} no encontrada en el Gateway`);
 }
 
 module.exports = {

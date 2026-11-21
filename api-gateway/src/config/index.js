@@ -31,11 +31,15 @@ module.exports = {
     password: process.env.ADMIN_PASSWORD || 'Admin1234*'
   },
 
+  // Service Discovery por variables de entorno para los 5 microservicios destino
   services: {
     productos: process.env.PRODUCTOS_URL || 'http://productos-service:8080',
     inventario: process.env.INVENTARIO_URL || 'http://inventario-service:8080',
     ventas: process.env.VENTAS_URL || 'http://ventas-service:8080',
     compras: process.env.COMPRAS_URL || 'http://compras-service:8080',
     analitica: process.env.ANALITICA_URL || 'http://analitica-service:8080'
-  }
+  },
+
+  // Tiempo de espera para peticiones hacia microservicios destino (10 segundos por defecto)
+  proxyTimeoutMs: parseInt(process.env.PROXY_TIMEOUT_MS, 10) || 10000
 };
