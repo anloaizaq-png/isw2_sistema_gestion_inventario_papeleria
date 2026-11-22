@@ -9,10 +9,11 @@ from app.clients import (
     exigir_producto_activo,
     listar_sugerencias_pendientes,
     marcar_sugerencia_atendida,
+    registrar_movimiento_inventario,
 )
 from app.database import get_db
 from app.models import OrdenCompra, OrdenCompraDetalle, Proveedor
-from app.schemas import EstadoOrden, OrdenCompraCreate, OrdenCompraOut
+from app.schemas import EstadoOrden, OrdenCompraCreate, OrdenCompraOut, RecepcionCreate
 
 router = APIRouter(prefix="/api/compras/ordenes-compra", tags=["Órdenes de compra"])
 
@@ -112,6 +113,60 @@ def cancelar_orden(orden_id: int, db: Session = Depends(get_db)):
     if orden.estado != "pendiente":
         raise HTTPException(409, f"Solo se puede cancelar una orden pendiente (estado actual: {orden.estado})")
     orden.estado = "cancelada"
+    db.commit()
+    db.refresh(orden)
+    return orden
+
+
+@router.put("/{orden_id}/recibir", response_model=OrdenCompraOut)
+def recibir_orden(
+    orden_id: int,
+    datos: RecepcionCreate,
+    x_user_id: int | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    # Se bloquea la fila de la orden: dos recepciones simultáneas no pueden superar lo solicitado
+    orden = db.scalars(
+        select(OrdenCompra).where(OrdenCompra.id == orden_id).with_for_update()
+    ).first()
+    if orden is None:
+        raise HTTPException(404, "Orden de compra no encontrada")
+    if orden.estado in ("cancelada", "recibida_total"):
+        raise HTTPException(409, f"No se puede recibir una orden en estado {orden.estado}")
+
+    detalles = {d.producto_id: d for d in orden.detalles}
+    vistos = set()
+    for linea in datos.productos_recibidos:
+        if linea.producto_id in vistos:
+            raise HTTPException(422, f"El producto {linea.producto_id} está repetido en la recepción")
+        vistos.add(linea.producto_id)
+        detalle = detalles.get(linea.producto_id)
+        if detalle is None:
+            raise HTTPException(422, f"El producto {linea.producto_id} no pertenece a la orden")
+        pendiente = detalle.cantidad_solicitada - detalle.cantidad_recibida
+        if linea.cantidad > pendiente:
+            raise HTTPException(
+                422, f"Producto {linea.producto_id}: se reciben {linea.cantidad} y solo faltan {pendiente}"
+            )
+
+    # Entradas en Inventario. El operacion_id es siempre el mismo para la misma recepción,
+    # así que si algo falla y se reintenta, Inventario no duplica el stock.
+    for linea in datos.productos_recibidos:
+        detalle = detalles[linea.producto_id]
+        registrar_movimiento_inventario(
+            operacion_id=f"compra-{orden.id}-{linea.producto_id}-{detalle.cantidad_recibida}",
+            producto_id=linea.producto_id,
+            bodega_id=datos.bodega_id,
+            tipo="ENTRADA",
+            cantidad=linea.cantidad,
+            usuario_id=x_user_id,
+        )
+
+    # Solo si Inventario aceptó todas las entradas se actualiza la orden
+    for linea in datos.productos_recibidos:
+        detalles[linea.producto_id].cantidad_recibida += linea.cantidad
+    todo_recibido = all(d.cantidad_recibida == d.cantidad_solicitada for d in orden.detalles)
+    orden.estado = "recibida_total" if todo_recibido else "recibida_parcial"
     db.commit()
     db.refresh(orden)
     return orden
