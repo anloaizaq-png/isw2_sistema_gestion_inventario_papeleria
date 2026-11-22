@@ -106,3 +106,46 @@ class OrdenCompraDetalle(Base):
     precio_unitario: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
 
     orden: Mapped["OrdenCompra"] = relationship(back_populates="detalles")
+
+
+class DevolucionProveedor(Base):
+    """Devolución de mercancía recibida hacia el proveedor (no es la devolución de un cliente,
+    esa vive en Ventas). El proveedor se obtiene a través de la orden de compra."""
+
+    __tablename__ = "devoluciones_proveedor"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    orden_compra_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("ordenes_compra.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    bodega_id: Mapped[int] = mapped_column(Integer, nullable=False)  # referencia lógica a Inventario
+    usuario_id: Mapped[int | None] = mapped_column(Integer, nullable=True)  # referencia lógica
+    motivo: Mapped[str] = mapped_column(String(255), nullable=False)
+    fecha: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    orden: Mapped["OrdenCompra"] = relationship()
+    detalles: Mapped[list["DevolucionProveedorDetalle"]] = relationship(
+        back_populates="devolucion",
+        order_by="DevolucionProveedorDetalle.id",
+        cascade="all, delete-orphan",
+    )
+
+    @property
+    def proveedor_id(self) -> int:
+        return self.orden.proveedor_id
+
+
+class DevolucionProveedorDetalle(Base):
+    __tablename__ = "devolucion_proveedor_detalle"
+    __table_args__ = (
+        UniqueConstraint("devolucion_proveedor_id", "producto_id", name="uq_devolucion_producto"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    devolucion_proveedor_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("devoluciones_proveedor.id", ondelete="RESTRICT"), nullable=False
+    )
+    producto_id: Mapped[int] = mapped_column(Integer, nullable=False)  # referencia lógica
+    cantidad: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    devolucion: Mapped["DevolucionProveedor"] = relationship(back_populates="detalles")
