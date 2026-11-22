@@ -4,7 +4,7 @@ from fastapi import FastAPI
 
 from app import models  # noqa: F401  (registra las tablas en Base.metadata)
 from app.database import Base, engine
-from app.routers import categorias
+from app.routers import categorias, productos
 
 
 @asynccontextmanager
@@ -23,8 +23,9 @@ app = FastAPI(
     redoc_url=None,
 )
 
-# Las rutas fijas (/categorias) se registran antes que /{producto_id}
+# Las rutas fijas (/categorias, y luego /buscar) se registran antes que /{producto_id}
 app.include_router(categorias.router)
+app.include_router(productos.router)
 
 
 @app.get("/health", tags=["Salud"])
