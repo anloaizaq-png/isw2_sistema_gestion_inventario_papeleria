@@ -92,3 +92,10 @@ class ProductoOut(BaseModel):
     estado: Estado
     fecha_creacion: datetime
     fecha_actualizacion: datetime
+    
+
+class ProductoPagina(BaseModel):
+    page: int
+    limit: int
+    total: int
+    data: list[ProductoOut]
