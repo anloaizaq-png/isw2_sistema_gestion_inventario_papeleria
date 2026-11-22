@@ -18,7 +18,7 @@ class Settings(BaseSettings):
 
     productos_url: str = "http://productos-service:8080"
     inventario_url: str = "http://inventario-service:8080"
-    alertas_url: str = "http://alertas-service:8080"
+    alertas_url: str = "http://analitica-service:8080"
 
     port: int = 8080
 
