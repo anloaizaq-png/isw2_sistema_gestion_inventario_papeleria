@@ -54,3 +54,49 @@ class ProveedorProductoOut(BaseModel):
     proveedor_id: int
     producto_id: int
     fecha_asociacion: datetime
+
+
+# ---------- Órdenes de compra ----------
+# Se devuelve como número JSON (por defecto pydantic serializaría Decimal como texto)
+Precio = Annotated[
+    Decimal,
+    Field(ge=0, max_digits=12, decimal_places=2),
+    PlainSerializer(lambda v: float(v), return_type=float, when_used="json"),
+]
+Total = Annotated[Decimal, PlainSerializer(lambda v: float(v), return_type=float, when_used="json")]
+
+
+class DetalleCreate(BaseModel):
+    producto_id: int = Field(gt=0)
+    cantidad: int = Field(gt=0)
+    precio_unitario: Precio
+
+
+class OrdenCompraCreate(BaseModel):
+    proveedor_id: int = Field(gt=0)
+    detalles: list[DetalleCreate] = Field(min_length=1)
+    sugerencia_id: int | None = Field(default=None, gt=0)
+
+
+class DetalleOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    producto_id: int
+    cantidad_solicitada: int
+    cantidad_recibida: int
+    cantidad_devuelta: int
+    precio_unitario: Precio
+
+
+class OrdenCompraOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    proveedor_id: int
+    usuario_id: int | None
+    sugerencia_id: int | None
+    fecha_creacion: datetime
+    estado: EstadoOrden
+    origen: Literal["manual", "alerta"]
+    total: Total
+    detalles: list[DetalleOut]
