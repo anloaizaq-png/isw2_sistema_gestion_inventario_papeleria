@@ -40,3 +40,17 @@ class ProveedorOut(BaseModel):
     direccion: str | None
     estado: Estado
     fecha_registro: datetime
+
+
+# ---------- Proveedor-Producto ----------
+class AsociarProducto(BaseModel):
+    producto_id: int = Field(gt=0)
+
+
+class ProveedorProductoOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    proveedor_id: int
+    producto_id: int
+    fecha_asociacion: datetime
