@@ -34,3 +34,20 @@ class Proveedor(Base):
         server_default="activo",
     )
     fecha_registro: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class ProveedorProducto(Base):
+    """Qué productos suministra cada proveedor. producto_id es una referencia
+    lógica al servicio de Productos (no hay FK entre bases de datos)."""
+
+    __tablename__ = "proveedor_producto"
+    __table_args__ = (
+        UniqueConstraint("proveedor_id", "producto_id", name="uq_proveedor_producto"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    proveedor_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("proveedores.id", ondelete="RESTRICT"), nullable=False
+    )
+    producto_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    fecha_asociacion: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

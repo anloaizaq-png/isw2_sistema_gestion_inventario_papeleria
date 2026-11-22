@@ -4,7 +4,7 @@ from fastapi import FastAPI
 
 from app import models  # noqa: F401  (registra las tablas en Base.metadata)
 from app.database import Base, engine
-from app.routers import proveedores
+from app.routers import proveedor_productos, proveedores
 
 
 @asynccontextmanager
@@ -24,6 +24,7 @@ app = FastAPI(
 )
 
 app.include_router(proveedores.router)
+app.include_router(proveedor_productos.router)
 
 
 @app.get("/health", tags=["Salud"])
