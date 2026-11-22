@@ -2,12 +2,13 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app import models  # noqa: F401  (registra las tablas en Base.metadata)
 from app.database import Base, engine
+from app.routers import categorias
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Crea las tablas si no existen (sin migraciones, igual que el resto del equipo)
     Base.metadata.create_all(bind=engine)
     yield
 
@@ -17,11 +18,13 @@ app = FastAPI(
     version="1.0.0",
     description="CRUD de productos, categorías y subcategorías.",
     lifespan=lifespan,
-    # Rutas bajo /api/productos para que pasen por el API Gateway
     docs_url="/api/productos/docs",
     openapi_url="/api/productos/openapi.json",
     redoc_url=None,
 )
+
+# Las rutas fijas (/categorias) se registran antes que /{producto_id}
+app.include_router(categorias.router)
 
 
 @app.get("/health", tags=["Salud"])
