@@ -109,3 +109,18 @@ def registrar_movimiento_inventario(
     if r.status_code in (400, 404, 422):
         raise HTTPException(422, f"Inventario rechazó la operación: {_detalle_error(r)}")
     raise HTTPException(502, "Respuesta inesperada del servicio de Inventario")
+
+
+def consultar_disponibilidad(producto_id: int, bodega_id: int, cantidad: int) -> dict:
+    """Pregunta a Inventario si hay stock suficiente (devuelve 'disponible' y 'stock_disponible')."""
+    r = _llamar(
+        "Inventario",
+        "GET",
+        f"{settings.inventario_url}/api/inventario/disponibilidad",
+        params={"producto_id": producto_id, "bodega_id": bodega_id, "cantidad": cantidad},
+    )
+    if r.status_code == 200:
+        return r.json()
+    if r.status_code in (400, 404, 422):
+        raise HTTPException(422, f"Inventario rechazó la consulta: {_detalle_error(r)}")
+    raise HTTPException(502, "Respuesta inesperada del servicio de Inventario")

@@ -111,3 +111,38 @@ class LineaRecepcion(BaseModel):
 class RecepcionCreate(BaseModel):
     bodega_id: int = Field(gt=0)
     productos_recibidos: list[LineaRecepcion] = Field(min_length=1)
+
+
+# ---------- Devoluciones a proveedor ----------
+class LineaDevolucion(BaseModel):
+    producto_id: int = Field(gt=0)
+    cantidad: int = Field(gt=0)
+
+
+class DevolucionProveedorCreate(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    orden_compra_id: int = Field(gt=0)
+    bodega_id: int = Field(gt=0)
+    motivo: str = Field(min_length=1, max_length=255)
+    productos: list[LineaDevolucion] = Field(min_length=1)
+
+
+class DevolucionDetalleOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    producto_id: int
+    cantidad: int
+
+
+class DevolucionProveedorOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    orden_compra_id: int
+    proveedor_id: int
+    bodega_id: int
+    usuario_id: int | None
+    motivo: str
+    fecha: datetime
+    detalles: list[DevolucionDetalleOut]
