@@ -100,3 +100,14 @@ class OrdenCompraOut(BaseModel):
     origen: Literal["manual", "alerta"]
     total: Total
     detalles: list[DetalleOut]
+
+
+# ---------- Recepción ----------
+class LineaRecepcion(BaseModel):
+    producto_id: int = Field(gt=0)
+    cantidad: int = Field(gt=0)
+
+
+class RecepcionCreate(BaseModel):
+    bodega_id: int = Field(gt=0)
+    productos_recibidos: list[LineaRecepcion] = Field(min_length=1)
