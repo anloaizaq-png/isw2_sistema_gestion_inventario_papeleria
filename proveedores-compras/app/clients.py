@@ -36,3 +36,33 @@ def exigir_producto_activo(producto_id: int) -> dict:
     if producto.get("estado") != "activo":
         raise HTTPException(422, f"El producto {producto_id} está inactivo")
     return producto
+
+
+# ---------- Alertas ----------
+ALERTAS_SUGERENCIAS = "/api/alertas/sugerencias-reabastecimiento"
+
+
+def listar_sugerencias_pendientes():
+    """Proxy: devuelve las sugerencias de reabastecimiento pendientes de Alertas."""
+    r = _llamar(
+        "Alertas",
+        "GET",
+        f"{settings.alertas_url}{ALERTAS_SUGERENCIAS}",
+        params={"estado": "pendiente"},
+    )
+    if r.status_code != 200:
+        raise HTTPException(502, "Respuesta inesperada del servicio de Alertas")
+    return r.json()
+
+
+def marcar_sugerencia_atendida(sugerencia_id: int, orden_id: int) -> None:
+    """Avisa a Alertas que la sugerencia ya generó una orden.
+    Es 'mejor esfuerzo': si Alertas no responde, la orden ya creada no se revierte."""
+    try:
+        httpx.patch(
+            f"{settings.alertas_url}{ALERTAS_SUGERENCIAS}/{sugerencia_id}/estado",
+            json={"estado": "atendida", "orden_compra_id": orden_id},
+            timeout=TIMEOUT,
+        )
+    except httpx.RequestError:
+        logger.warning("No se pudo notificar a Alertas la sugerencia %s", sugerencia_id)
