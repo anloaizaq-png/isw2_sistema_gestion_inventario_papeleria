@@ -66,20 +66,35 @@ Al terminar cada ejecución, Locust imprime una tabla con peticiones, fallos, ti
 
 ## 4. Resultados preliminares
 
+Ejecución local (un proceso Uvicorn por servicio, bases MySQL en Docker, Locust en el mismo equipo). Fecha: 22/11/2026.
+
 | Código | Usuarios | RPS | Media (ms) | p95 (ms) | p99 (ms) | % fallos | Criterio | Resultado |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :--- | :--- |
-| PC-01 | 1 | | | | | | 200 y JSON válido | |
-| PC-02 | 100 | | | | | | 200/404, sin 500 | |
-| PC-03 | 20 | | | | | | 201 / 409 | |
-| PC-04 | 50 | | | | | | Filtros correctos | |
-| PC-05 | 20 | | | | | | Registro consistente | |
-| PC-06 | 10 | | | | | | Queda `inactivo` | |
-| PC-07 | 50 | | | | | | 200 | |
-| PC-08 | 20 | | | | | | Subcategoría ligada | |
-| PC-09 | 10 a 100 | | | | | | Sin 500; recupera | |
-| PC-10 | 50 | | | | | | 200; filtros correctos | |
-| PC-11 | 20 | | | | | | 200/404; sin degradación | |
-| PC-12 | 20 | | | | | | 201 / 422 | |
-| PC-13 | 20 | | | | | | Total consistente | |
-| PC-14 | 10 | | | | | | Estado y 409 correctos | |
-| PC-15 | 200 → 10 | | | | | | Recupera sin intervención | |
+| PC-01 | 1 | 3.03 | 15 | 19 | 27 | 0 | 200 y JSON válido | Cumple |
+| PC-02 | 100 | 213.99 | 100 | 250 | 310 | 0 | 200/404, sin 500 | Cumple |
+| PC-03 | 20 | 59.19 | 27 | 54 | 80 | 0 | 201 únicos / 409 duplicados | Cumple |
+| PC-04 | 50 | 140.15 | 30 | 78 | 160 | 0 | Filtros correctos | Cumple |
+| PC-05 | 20 | 59.24 | 29 | 60 | 79 | 0 | Registro consistente | Cumple |
+| PC-06 | 10 | 71.44 (3 peticiones por ciclo) | 34 | 55 | 420 | 0 | Queda `inactivo` y consultable | Cumple |
+| PC-07 | 50 | 147.23 | 12 | 28 | 62 | 0 | 200 | Cumple |
+| PC-08 | 20 | 109.29 | 27 | 54 | 78 | 0 | Subcategoría ligada al padre | Cumple |
+| PC-09 | 10 | 30.09 | 24 | 39 | 47 | 0 | Sin 500 | Cumple |
+| PC-09 | 25 | 75.80 | 22 | 46 | 61 | 0 | Sin 500 | Cumple |
+| PC-09 | 50 | 139.80 | 42 | 150 | 300 | 0 | Sin 500 | Cumple |
+| PC-09 | 75 | 147.03 | 180 | 390 | 690 | 0 | Sin 500 | Cumple (degradación) |
+| PC-09 | 100 | 152.93 | 292 | 670 | 1200 | 0 | Sin 500 | Cumple (degradación) |
+| PC-10 | 50 | 145.88 | 15 | 35 | 100 | 0 | 200; filtros correctos | Cumple |
+| PC-11 | 20 | 62.04 | 16 | 30 | 39 | 0 | 200/404, sin degradación (2 min, preliminar) | Cumple |
+| PC-12 | 20 | 58.57 | 31 | 110 | 190 | 0 | 201 / 422 | Cumple |
+| PC-13 | 20 | 38.25 | 209 | 410 | 550 | 0 | Total = suma(cantidad × precio) | Cumple |
+| PC-14 | 10 | 60.62 | 114 | 300 | 910 | 0 | Estado y 409 correctos | Cumple |
+| PC-15 pico | 200 | 122.06 | 1223 | 1500 | 18000 | 0 | Sin pérdida de datos | Cumple, con hallazgo |
+| PC-15 recuperación | 10 | 21.03 | 92 | 360 | 470 | 0 | Se recupera sin intervención | Cumple |
+
+## 5. Análisis
+
+- **Consultas, creaciones y actualizaciones:** todas respondieron muy por debajo de los 2 s del RNF06, con 0 fallos.
+- **Estrés (PC-09):** el servicio se degrada de forma gradual entre 50 y 75 usuarios y se estanca en unas 150 peticiones por segundo. No hubo errores 500 ni pérdida de datos. El límite corresponde a un solo proceso de Uvicorn.
+- **Pico (PC-15):** el listado `GET /api/compras/proveedores` no está paginado y, con más de 2.800 proveedores creados por las pruebas, tardó 15,8 s de media con 200 usuarios. El servicio se recuperó al bajar a 10 usuarios (227 ms) sin intervención.
+- **Optimizaciones propuestas para la Entrega 4:** paginar los listados de proveedores y categorías, y ejecutar varias réplicas de cada servicio en Kubernetes para escalar la capacidad de lectura (RNF05).
+- **PC-11** se ejecutó 2 minutos en esta entrega; la prueba completa de 10 minutos queda para la Entrega 4.
