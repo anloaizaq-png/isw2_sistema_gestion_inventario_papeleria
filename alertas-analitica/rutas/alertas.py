@@ -49,8 +49,8 @@ def _entero_query(nombre, por_defecto=None, minimo=1):
 
 
 def _usuario_actual():
-    """Id del usuario enviado por el API Gateway en X-Usuario-Id, o None."""
-    valor = request.headers.get("X-Usuario-Id", "").strip()
+    """Id del usuario enviado por el API Gateway en X-User-Id, o None."""
+    valor = request.headers.get("X-User-Id", "").strip()
     return int(valor) if valor.isdigit() else None
 
 
