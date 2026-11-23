@@ -3,14 +3,17 @@
 GET   /api/alertas/              Listar alertas (filtros y paginación)
 GET   /api/alertas/{id}          Consultar una alerta
 PATCH /api/alertas/{id}/estado   Cambiar el estado de una alerta
-
-POST /api/alertas/evaluar se agregará cuando esté definida la integración
-con el servicio de Inventario.
+POST  /api/alertas/evaluar       Evaluar el stock contra los umbrales y generar alertas
 """
+
+import math
+from datetime import datetime, timezone
+from decimal import Decimal
 
 from flask import Blueprint, abort, jsonify, request
 
-from database import consultar, consultar_uno, ejecutar
+from clientes.inventario import stock_agrupado
+from database import consultar, consultar_uno, ejecutar, transaccion
 
 bp = Blueprint("alertas", __name__, url_prefix="/api/alertas")
 
@@ -136,3 +139,85 @@ def cambiar_estado(alerta_id):
         )
 
     return jsonify(_buscar(alerta_id))
+
+
+@bp.post("/evaluar")
+def evaluar_stock():
+    """Compara el stock de Inventario con los umbrales activos (RF09).
+
+    Reglas acordadas:
+      - Stock del umbral: el de su bodega, o la suma de todas si no tiene bodega.
+      - Umbral aplicado = stock_minimo x multiplicador de la temporada vigente
+        (1 si no hay), redondeado hacia arriba.
+      - Si stock <= umbral aplicado: alerta "agotado" (stock 0) o "stock_bajo".
+      - No se duplica una alerta pendiente o en gestión del mismo producto y tipo.
+      - Cada alerta nueva genera una sugerencia por (2 x umbral aplicado - stock).
+    """
+    umbrales = consultar(
+        "SELECT producto_id, bodega_id, stock_minimo FROM umbral_stock "
+        "WHERE activo = TRUE ORDER BY id"
+    )
+    if not umbrales:
+        return jsonify({"productos_evaluados": 0, "alertas_generadas": 0})
+
+    # Responde 503 si Inventario no está disponible
+    por_producto, por_producto_bodega = stock_agrupado()
+
+    # Temporada vigente hoy (fechas en UTC); si hay varias, se usa el mayor multiplicador
+    hoy = datetime.now(timezone.utc).date()
+    temporada = consultar_uno(
+        "SELECT MAX(multiplicador) AS multiplicador FROM temporada "
+        "WHERE fecha_inicio <= %s AND fecha_fin >= %s",
+        (hoy, hoy),
+    )
+    multiplicador = Decimal(temporada["multiplicador"] or 1)
+
+    abiertas = {
+        (fila["producto_id"], fila["tipo"])
+        for fila in consultar(
+            "SELECT producto_id, tipo FROM alerta "
+            "WHERE estado IN ('pendiente', 'en_gestion')"
+        )
+    }
+
+    productos_evaluados = set()
+    alertas_generadas = 0
+
+    with transaccion() as cursor:
+        for umbral in umbrales:
+            producto_id = umbral["producto_id"]
+            bodega_id = umbral["bodega_id"]
+            productos_evaluados.add(producto_id)
+
+            if bodega_id is None:
+                stock = por_producto.get(producto_id, 0)
+            else:
+                stock = por_producto_bodega.get((producto_id, bodega_id), 0)
+
+            umbral_aplicado = math.ceil(umbral["stock_minimo"] * multiplicador)
+            if stock > umbral_aplicado:
+                continue
+
+            tipo = "agotado" if stock <= 0 else "stock_bajo"
+            if (producto_id, tipo) in abiertas:
+                continue
+
+            cursor.execute(
+                "INSERT INTO alerta (producto_id, tipo, stock_actual, umbral_aplicado, "
+                "multiplicador_aplicado) VALUES (%s, %s, %s, %s, %s)",
+                (producto_id, tipo, stock, umbral_aplicado, multiplicador),
+            )
+            cursor.execute(
+                "INSERT INTO sugerencia_reabastecimiento "
+                "(alerta_id, producto_id, cantidad_sugerida) VALUES (%s, %s, %s)",
+                (cursor.lastrowid, producto_id, max(1, 2 * umbral_aplicado - stock)),
+            )
+            abiertas.add((producto_id, tipo))
+            alertas_generadas += 1
+
+    return jsonify(
+        {
+            "productos_evaluados": len(productos_evaluados),
+            "alertas_generadas": alertas_generadas,
+        }
+    )
