@@ -62,7 +62,7 @@ def crear_app():
     app.register_blueprint(sugerencias_bp)
     app.register_blueprint(analitica_bp)
 
-    @app.get("/salud")
+    @app.get("/health")
     def salud():
         """Comprueba que el servicio está activo y que la base de datos responde."""
         consultar_uno("SELECT 1 AS ok")
