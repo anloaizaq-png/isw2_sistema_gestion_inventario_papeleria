@@ -17,7 +17,7 @@ from config import Config
 from database import consultar_uno
 from rutas.umbrales import bp as umbrales_bp
 from rutas.temporadas import bp as temporadas_bp
-
+from rutas.alertas import bp as alertas_bp
 
 class ProveedorJSON(DefaultJSONProvider):
     """Convierte fechas a formato ISO 8601 y decimales a números."""
@@ -56,6 +56,7 @@ def crear_app():
 
     app.register_blueprint(umbrales_bp)
     app.register_blueprint(temporadas_bp)
+    app.register_blueprint(alertas_bp)
 
     @app.get("/salud")
     def salud():
