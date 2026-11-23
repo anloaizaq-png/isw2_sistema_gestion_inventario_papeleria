@@ -1,0 +1,7 @@
+# Archivos que NO deben copiarse a la imagen de Docker
+.env
+.venv/
+__pycache__/
+*.pyc
+db/
+.gitkeep
