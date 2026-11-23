@@ -16,6 +16,7 @@ from werkzeug.exceptions import HTTPException
 from config import Config
 from database import consultar_uno
 from rutas.umbrales import bp as umbrales_bp
+from rutas.temporadas import bp as temporadas_bp
 
 
 class ProveedorJSON(DefaultJSONProvider):
@@ -54,6 +55,7 @@ def crear_app():
     app.url_map.strict_slashes = False
 
     app.register_blueprint(umbrales_bp)
+    app.register_blueprint(temporadas_bp)
 
     @app.get("/salud")
     def salud():
