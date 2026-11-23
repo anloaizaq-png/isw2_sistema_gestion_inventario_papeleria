@@ -1,223 +1,164 @@
-# Suite de Pruebas de Rendimiento con Locust (`P3-01` a `P3-15`)
-
-Este documento especifica la configuración, comandos de ejecución y plantilla de resultados para los **15 escenarios de pruebas de rendimiento** de los microservicios de **Inventario** (`inventario-service`) y **Ventas y Pedidos** (`ventas-service`) del proyecto **Cotton Cloud Paper**.
-
----
-
-## 1. Resumen de los 15 Escenarios de Prueba
-
-| Código | Método y Endpoint | Tipo de Carga | Usuarios Concurrentes | Tasa de Aparición (Spawn Rate) | Objetivo de Validación |
-| :--- | :--- | :--- | :---: | :---: | :--- |
-| **P3-01** | `GET /api/inventario/stock` | Carga normal | 10 | 2 usuarios/s | Consultas regulares de stock con baja latencia. |
-| **P3-02** | `GET /api/inventario/stock` | Carga pico | 40 | 5 usuarios/s | Capacidad de respuesta ante ráfagas de consulta de existencias. |
-| **P3-03** | `GET /api/inventario/stock` | Estrés | 80 | 10 usuarios/s | Punto de degradación y estabilidad bajo estrés extremo de lectura. |
-| **P3-04** | `GET /api/inventario/disponibilidad` | Carga normal | 10 | 2 usuarios/s | Validación rápida de stock disponible previo a orden. |
-| **P3-05** | `GET /api/inventario/disponibilidad` | Carga pico | 40 | 5 usuarios/s | Verificación masiva y concurrente de disponibilidad. |
-| **P3-06** | `POST /api/inventario/descuentos` | Carga normal | 5 | 1 usuario/s | Descuentos directos garantizando **cero stock negativo** vía `with_for_update()`. |
-| **P3-07** | `POST /api/inventario/descuentos` | Estrés | 30 | 5 usuarios/s | Idempotencia bajo concurrencia extrema con `operacion_id` repetido. |
-| **P3-08** | `POST /api/inventario/traslados` | Carga pico | 20 | 4 usuarios/s | Traslado atómico entre bodegas sin duplicación ni deadlocks. |
-| **P3-09** | `POST /api/ventas` | Carga normal | 10 | 2 usuarios/s | Creación de pedidos en estado `pendiente` con consulta a Productos. |
-| **P3-10** | `GET /api/ventas` | Carga pico | 40 | 5 usuarios/s | Consultas simultáneas y consistentes del histórico de ventas. |
-| **P3-11** | `POST /api/ventas/{id}/confirmacion` | Carga normal | 5 | 1 usuario/s | Confirmación de pedidos con descuento exitoso en Inventario. |
-| **P3-12** | `POST /api/ventas/{id}/confirmacion` | Estrés | 30 | 5 usuarios/s | Consistencia ACID: bloqueo pesimista y reversión si stock no alcanza. |
-| **P3-13** | `POST /api/ventas/{id}/devoluciones` | Carga normal | 5 | 1 usuario/s | Reintegro de stock sin superar la cantidad originalmente vendida. |
-| **P3-14** | `POST /api/ventas/{id}/devoluciones` | Estrés | 20 | 4 usuarios/s | Evitar devoluciones duplicadas mediante validación de `operacion_id`. |
-| **P3-15** | `POST /api/ventas/{id}/confirmacion` | Carga pico integración | 40 | 5 usuarios/s | Validación de integración HTTPX extremo a extremo Ventas -> Inventario. |
+# Suite de Pruebas de Rendimiento con Locust (`PR01`–`PR15`)
+## Microservicio: API Gateway y Servicio de Identidad (`gateway-service`)
+**Proyecto:** Sistema de Gestión de Inventarios - Cotton Cloud Paper
 
 ---
 
-## 2. Requisitos Previos e Instalación
+## 1. Descripción General
 
-1. **Instalar Locust:**
-   ```bash
-   pip install locust
-   ```
-
-2. **Entorno Docker en Ejecución:**
-   Asegurar que los microservicios y sus bases de datos MySQL se encuentren levantados y accesibles (por ejemplo en `http://localhost:8080` a través del API Gateway o proxies locales correspondientes).
-
-3. **Datos Semilla (Seed Data):**
-   - Base de datos `inventario`: Bodegas con IDs `1` y `2` activas; productos con stock inicial positivo en `existencia`.
-   - Base de datos `ventas`: Productos de catálogo activos en el microservicio de `productos-service`.
+Esta suite implementa en **Locust** (`locustfile_gateway.py`) los **15 escenarios de rendimiento y resiliencia** definidos en la especificación técnica (`docs/GATEWAY_SPEC.md`). Evalúa la latencia, concurrencia, resiliencia del reverse proxy y el comportamiento de seguridad (autenticación JWT, rotación obligatoria de refresh tokens, revocación de sesiones, control de acceso RBAC y rate limiting por cuenta/IP).
 
 ---
 
-## 3. Comandos de Ejecución por Escenario (Modo Headless)
+## 2. Catálogo de los 15 Escenarios de Prueba
 
-Todos los comandos se ejecutan desde la raíz del proyecto o desde `docs/pruebas-rendimiento/`:
+| ID | Nombre del Escenario | Endpoint / Operación | Concurrencia | Resultado Esperado |
+| :--- | :--- | :--- | :--- | :--- |
+| **`PR01`** | Enrutamiento repetido | `GET /api/productos` | 1 usuario (20 iter.) | Reenvío pass-through exitoso (`200 OK` o `503` si el microservicio está detenido). |
+| **`PR02`** | Enrutamiento concurrente | `/api/{productos,inventario,ventas,compras,alertas}` | 5 usuarios concurrentes | Reenvío balanceado a los 5 servicios con inyección de cabeceras `X-User-*`. |
+| **`PR03`** | Incremento progresivo de carga | `GET /health` y rutas base | 1, 5 y 10 usuarios | Medición de degradación controlada de latencia y estabilidad de memoria. |
+| **`PR04`** | Pico de solicitudes | Rampa rápida (spawn-rate 10) | 1 a 10 usuarios simultáneos | Absorción del pico sin bloqueos ni errores 500 no controlados. |
+| **`PR05`** | Servicio de destino no disponible | Peticiones a servicio detenido y `/health` | Concurrente | Respuestas `503`/`502` controladas sin colapsar el Gateway ni frenar otros servicios. |
+| **`PR06`** | Listado paginado de usuarios | `GET /api/usuarios?page=1&limit=5` | 1 admin (20 iter.) | Paginación rápida validando permiso `usuarios:administrar`. |
+| **`PR07`** | Perfiles distintos concurrentes | `GET /api/usuarios/{id}` | 5 admins concurrentes | Sin mezcla de datos (*data leakage*); cada petición retorna su ID correspondiente. |
+| **`PR08`** | Creación concurrente de cuentas | `POST /api/usuarios` (cuentas únicas) | 5 admins (10 cuentas) | Códigos `201 Created` e inserción íntegra con hashing bcrypt. |
+| **`PR09`** | Creación concurrente correo repetido | `POST /api/usuarios` (mismo correo) | 5 peticiones simultáneas | Exactamente **1 creada (`201`)** y **4 rechazadas con `409 Conflict`**. |
+| **`PR10`** | Actualización concurrente de perfiles | `PATCH /api/usuarios/{id}` | 5 admins concurrentes | Actualizaciones atómicas en MySQL sin bloqueos de tabla. |
+| **`PR11`** | Inicio de sesión concurrente | `POST /api/auth/login` | 5 usuarios simultáneos | Generación concurrente de JWT y Refresh Tokens sin colisión. |
+| **`PR12`** | Consultas concurrentes a `/me` | `GET /api/auth/me` | 5 sesiones independientes | Extracción correcta de claims de sesión (`sid`, roles y permisos). |
+| **`PR13`** | Renovación y rechazo token rotado | `POST /api/auth/refresh` | 5 sesiones concurrentes | Emisión de nuevo par y **rechazo obligatorio (`401`)** del token anterior rotado. |
+| **`PR14`** | Rate limiting por cuenta vs normal | `POST /api/auth/login` (fallos) | Concurrente | Bloqueo temporal `429` en cuenta atacada mientras la cuenta válida ingresa normal (`200`). |
+| **`PR15`** | Ciclo completo repetido | Login -> Me -> Refresh -> Logout -> Reuso | 5 clientes (10 ciclos) | `200` en pasos válidos y **rechazo `401`** inmediato al reusar sesión revocada. |
 
-### P3-01: Stock - Carga Normal (10 usuarios)
+---
+
+## 3. Formas de Ejecución
+
+El microservicio Gateway debe estar en ejecución previamente (en `http://localhost:8080`).
+
+### Opción A: Ejecución 100% Contenerizada con Docker (Recomendada)
+No requiere instalar Python ni dependencias en tu máquina local. Se utiliza la imagen oficial `locustio/locust`.
+
 ```bash
-locust -f docs/pruebas-rendimiento/locustfile_inventario_ventas.py \
-  --host=http://localhost:8080 \
-  --tags P3-01 \
-  --users 10 --spawn-rate 2 --run-time 1m \
-  --headless --html docs/pruebas-rendimiento/reporte_P3-01.html
+# 1. Ejecutar toda la suite en modo headless (consola):
+docker run --rm --network=cotton-net \
+  -v $(pwd)/docs/pruebas-rendimiento:/mnt/locust \
+  locustio/locust \
+  -f /mnt/locust/locustfile_gateway.py \
+  --host=http://gateway-service:8080 \
+  --headless -u 10 -r 2 --run-time 1m
+
+# 2. Levantar la interfaz Web interactiva de Locust (puerto 8089):
+docker run --rm -p 8089:8089 --network=cotton-net \
+  -v $(pwd)/docs/pruebas-rendimiento:/mnt/locust \
+  locustio/locust \
+  -f /mnt/locust/locustfile_gateway.py \
+  --host=http://gateway-service:8080
 ```
+> Si usas la interfaz web, abre en tu navegador: [http://localhost:8089](http://localhost:8089).
 
-### P3-02: Stock - Carga Pico (40 usuarios)
-```bash
-locust -f docs/pruebas-rendimiento/locustfile_inventario_ventas.py \
-  --host=http://localhost:8080 \
-  --tags P3-02 \
-  --users 40 --spawn-rate 5 --run-time 1m \
-  --headless --html docs/pruebas-rendimiento/reporte_P3-02.html
-```
+---
 
-### P3-03: Stock - Estrés (80 usuarios)
+### Opción B: Ejecución Local con Python (si tienes Locust instalado)
 ```bash
-locust -f docs/pruebas-rendimiento/locustfile_inventario_ventas.py \
-  --host=http://localhost:8080 \
-  --tags P3-03 \
-  --users 80 --spawn-rate 10 --run-time 2m \
-  --headless --html docs/pruebas-rendimiento/reporte_P3-03.html
-```
+cd docs/pruebas-rendimiento
 
-### P3-04: Disponibilidad - Carga Normal (10 usuarios)
-```bash
-locust -f docs/pruebas-rendimiento/locustfile_inventario_ventas.py \
-  --host=http://localhost:8080 \
-  --tags P3-04 \
-  --users 10 --spawn-rate 2 --run-time 1m \
-  --headless --html docs/pruebas-rendimiento/reporte_P3-04.html
-```
+# Modo interactivo con Web UI:
+locust -f locustfile_gateway.py --host=http://localhost:8080
 
-### P3-05: Disponibilidad - Carga Pico (40 usuarios)
-```bash
-locust -f docs/pruebas-rendimiento/locustfile_inventario_ventas.py \
-  --host=http://localhost:8080 \
-  --tags P3-05 \
-  --users 40 --spawn-rate 5 --run-time 1m \
-  --headless --html docs/pruebas-rendimiento/reporte_P3-05.html
-```
-
-### P3-06: Descuentos - Carga Normal (5 usuarios, cero stock negativo)
-```bash
-locust -f docs/pruebas-rendimiento/locustfile_inventario_ventas.py \
-  --host=http://localhost:8080 \
-  --tags P3-06 \
-  --users 5 --spawn-rate 1 --run-time 1m \
-  --headless --html docs/pruebas-rendimiento/reporte_P3-06.html
-```
-
-### P3-07: Descuentos - Estrés e Idempotencia (30 usuarios)
-```bash
-locust -f docs/pruebas-rendimiento/locustfile_inventario_ventas.py \
-  --host=http://localhost:8080 \
-  --tags P3-07 \
-  --users 30 --spawn-rate 5 --run-time 2m \
-  --headless --html docs/pruebas-rendimiento/reporte_P3-07.html
-```
-
-### P3-08: Traslados - Carga Pico (20 usuarios)
-```bash
-locust -f docs/pruebas-rendimiento/locustfile_inventario_ventas.py \
-  --host=http://localhost:8080 \
-  --tags P3-08 \
-  --users 20 --spawn-rate 4 --run-time 1m \
-  --headless --html docs/pruebas-rendimiento/reporte_P3-08.html
-```
-
-### P3-09: Crear Venta - Carga Normal (10 usuarios)
-```bash
-locust -f docs/pruebas-rendimiento/locustfile_inventario_ventas.py \
-  --host=http://localhost:8080 \
-  --tags P3-09 \
-  --users 10 --spawn-rate 2 --run-time 1m \
-  --headless --html docs/pruebas-rendimiento/reporte_P3-09.html
-```
-
-### P3-10: Consultar Ventas - Carga Pico (40 usuarios)
-```bash
-locust -f docs/pruebas-rendimiento/locustfile_inventario_ventas.py \
-  --host=http://localhost:8080 \
-  --tags P3-10 \
-  --users 40 --spawn-rate 5 --run-time 1m \
-  --headless --html docs/pruebas-rendimiento/reporte_P3-10.html
-```
-
-### P3-11: Confirmar Venta - Carga Normal (5 usuarios)
-```bash
-locust -f docs/pruebas-rendimiento/locustfile_inventario_ventas.py \
-  --host=http://localhost:8080 \
-  --tags P3-11 \
-  --users 5 --spawn-rate 1 --run-time 1m \
-  --headless --html docs/pruebas-rendimiento/reporte_P3-11.html
-```
-
-### P3-12: Confirmar Venta - Estrés (30 usuarios)
-```bash
-locust -f docs/pruebas-rendimiento/locustfile_inventario_ventas.py \
-  --host=http://localhost:8080 \
-  --tags P3-12 \
-  --users 30 --spawn-rate 5 --run-time 2m \
-  --headless --html docs/pruebas-rendimiento/reporte_P3-12.html
-```
-
-### P3-13: Devoluciones - Carga Normal (5 usuarios)
-```bash
-locust -f docs/pruebas-rendimiento/locustfile_inventario_ventas.py \
-  --host=http://localhost:8080 \
-  --tags P3-13 \
-  --users 5 --spawn-rate 1 --run-time 1m \
-  --headless --html docs/pruebas-rendimiento/reporte_P3-13.html
-```
-
-### P3-14: Devoluciones - Estrés e Idempotencia (20 usuarios)
-```bash
-locust -f docs/pruebas-rendimiento/locustfile_inventario_ventas.py \
-  --host=http://localhost:8080 \
-  --tags P3-14 \
-  --users 20 --spawn-rate 4 --run-time 1m \
-  --headless --html docs/pruebas-rendimiento/reporte_P3-14.html
-```
-
-### P3-15: Confirmación Integración Ventas -> Inventario - Carga Pico (40 usuarios)
-```bash
-locust -f docs/pruebas-rendimiento/locustfile_inventario_ventas.py \
-  --host=http://localhost:8080 \
-  --tags P3-15 \
-  --users 40 --spawn-rate 5 --run-time 2m \
-  --headless --html docs/pruebas-rendimiento/reporte_P3-15.html
+# Modo Headless por consola:
+locust -f locustfile_gateway.py --host=http://localhost:8080 --headless -u 10 -r 2 --run-time 1m
 ```
 
 ---
 
-## 4. Ejecución Completa con Interfaz Web de Locust
+## 4. Comandos de Ejecución por Escenario Específico (Tags)
 
-Para lanzar todos los escenarios con monitoreo gráfico interactivo en tiempo real:
+Puedes ejecutar cualquiera de los 15 escenarios de forma aislada mediante la bandera `--tags`:
 
 ```bash
-locust -f docs/pruebas-rendimiento/locustfile_inventario_ventas.py --host=http://localhost:8080
+# PR01: Enrutamiento repetido a Productos
+locust -f docs/pruebas-rendimiento/locustfile_gateway.py --host=http://localhost:8080 --headless -u 1 -r 1 --run-time 30s --tags PR01
+
+# PR02: Enrutamiento concurrente a los 5 microservicios
+locust -f docs/pruebas-rendimiento/locustfile_gateway.py --host=http://localhost:8080 --headless -u 5 -r 1 --run-time 45s --tags PR02
+
+# PR03: Incremento progresivo de carga (1, 5, 10 clientes)
+locust -f docs/pruebas-rendimiento/locustfile_gateway.py --host=http://localhost:8080 --headless -u 10 -r 1 --run-time 1m --tags PR03
+
+# PR04: Pico repentino de solicitudes (rampa 10)
+locust -f docs/pruebas-rendimiento/locustfile_gateway.py --host=http://localhost:8080 --headless -u 10 -r 10 --run-time 30s --tags PR04
+
+# PR05: Servicio destino no disponible (resiliencia y 503)
+locust -f docs/pruebas-rendimiento/locustfile_gateway.py --host=http://localhost:8080 --headless -u 5 -r 1 --run-time 30s --tags PR05
+
+# PR06: Listado paginado repetido de usuarios (20 consultas)
+locust -f docs/pruebas-rendimiento/locustfile_gateway.py --host=http://localhost:8080 --headless -u 1 -r 1 --run-time 30s --tags PR06
+
+# PR07: Consulta concurrente de perfiles distintos
+locust -f docs/pruebas-rendimiento/locustfile_gateway.py --host=http://localhost:8080 --headless -u 5 -r 2 --run-time 30s --tags PR07
+
+# PR08: Creación concurrente de 10 cuentas distintas
+locust -f docs/pruebas-rendimiento/locustfile_gateway.py --host=http://localhost:8080 --headless -u 5 -r 2 --run-time 30s --tags PR08
+
+# PR09: Creación concurrente con correo repetido (1 x 201, 4 x 409)
+locust -f docs/pruebas-rendimiento/locustfile_gateway.py --host=http://localhost:8080 --headless -u 5 -r 5 --run-time 20s --tags PR09
+
+# PR10: Actualización concurrente de perfiles
+locust -f docs/pruebas-rendimiento/locustfile_gateway.py --host=http://localhost:8080 --headless -u 5 -r 2 --run-time 30s --tags PR10
+
+# PR11: Inicio de sesión concurrente
+locust -f docs/pruebas-rendimiento/locustfile_gateway.py --host=http://localhost:8080 --headless -u 5 -r 2 --run-time 45s --tags PR11
+
+# PR12: Consultas concurrentes a GET /api/auth/me
+locust -f docs/pruebas-rendimiento/locustfile_gateway.py --host=http://localhost:8080 --headless -u 5 -r 2 --run-time 45s --tags PR12
+
+# PR13: Renovación concurrente y rechazo de refresh token anterior rotado
+locust -f docs/pruebas-rendimiento/locustfile_gateway.py --host=http://localhost:8080 --headless -u 5 -r 2 --run-time 45s --tags PR13
+
+# PR14: Intentos fallidos hasta rate limit (429) vs cuenta válida
+locust -f docs/pruebas-rendimiento/locustfile_gateway.py --host=http://localhost:8080 --headless -u 2 -r 1 --run-time 30s --tags PR14
+
+# PR15: Ciclo completo repetido (Login -> /me -> Refresh -> Logout -> Reuso)
+locust -f docs/pruebas-rendimiento/locustfile_gateway.py --host=http://localhost:8080 --headless -u 5 -r 2 --run-time 1m --tags PR15
 ```
-Abrir el navegador en `http://localhost:8089`.
 
 ---
 
-## 5. Plantilla de Resultados de las Pruebas
+## 5. Plantilla de Resultados de Pruebas de Rendimiento
 
-| Código | Endpoint Evaluado | Tipo Carga | Usuarios | Spawn Rate | RPS Promedio | Latencia Media (ms) | p95 (ms) | p99 (ms) | % Fallos | Criterio de Aceptación |
-| :--- | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **P3-01** | `GET /api/inventario/stock` | Normal | 10 | 2 | _[Completar]_ | _[Completar]_ | _[Completar]_ | _[Completar]_ | < 1% | **CUMPLE** |
-| **P3-02** | `GET /api/inventario/stock` | Pico | 40 | 5 | _[Completar]_ | _[Completar]_ | _[Completar]_ | _[Completar]_ | < 2% | **CUMPLE** |
-| **P3-03** | `GET /api/inventario/stock` | Estrés | 80 | 10 | _[Completar]_ | _[Completar]_ | _[Completar]_ | _[Completar]_ | < 5% | **CUMPLE** |
-| **P3-04** | `GET /api/inventario/disponibilidad` | Normal | 10 | 2 | _[Completar]_ | _[Completar]_ | _[Completar]_ | _[Completar]_ | < 1% | **CUMPLE** |
-| **P3-05** | `GET /api/inventario/disponibilidad` | Pico | 40 | 5 | _[Completar]_ | _[Completar]_ | _[Completar]_ | _[Completar]_ | < 2% | **CUMPLE** |
-| **P3-06** | `POST /api/inventario/descuentos` | Normal | 5 | 1 | _[Completar]_ | _[Completar]_ | _[Completar]_ | _[Completar]_ | 0% stock < 0 | **CUMPLE** |
-| **P3-07** | `POST /api/inventario/descuentos` | Estrés | 30 | 5 | _[Completar]_ | _[Completar]_ | _[Completar]_ | _[Completar]_ | 0% duplicados | **CUMPLE** |
-| **P3-08** | `POST /api/inventario/traslados` | Pico | 20 | 4 | _[Completar]_ | _[Completar]_ | _[Completar]_ | _[Completar]_ | 0% deadlocks | **CUMPLE** |
-| **P3-09** | `POST /api/ventas` | Normal | 10 | 2 | _[Completar]_ | _[Completar]_ | _[Completar]_ | _[Completar]_ | < 1% | **CUMPLE** |
-| **P3-10** | `GET /api/ventas` | Pico | 40 | 5 | _[Completar]_ | _[Completar]_ | _[Completar]_ | _[Completar]_ | < 2% | **CUMPLE** |
-| **P3-11** | `POST /api/ventas/{id}/confirmacion` | Normal | 5 | 1 | _[Completar]_ | _[Completar]_ | _[Completar]_ | _[Completar]_ | Consistencia OK | **CUMPLE** |
-| **P3-12** | `POST /api/ventas/{id}/confirmacion` | Estrés | 30 | 5 | _[Completar]_ | _[Completar]_ | _[Completar]_ | _[Completar]_ | Consistencia OK | **CUMPLE** |
-| **P3-13** | `POST /api/ventas/{id}/devoluciones` | Normal | 5 | 1 | _[Completar]_ | _[Completar]_ | _[Completar]_ | _[Completar]_ | Dev <= Vendido | **CUMPLE** |
-| **P3-14** | `POST /api/ventas/{id}/devoluciones` | Estrés | 20 | 4 | _[Completar]_ | _[Completar]_ | _[Completar]_ | _[Completar]_ | 0% duplicados | **CUMPLE** |
-| **P3-15** | `POST /api/ventas/{id}/confirmacion` | Pico Int. | 40 | 5 | _[Completar]_ | _[Completar]_ | _[Completar]_ | _[Completar]_ | < 3% fallas red | **CUMPLE** |
+Utiliza la siguiente tabla para documentar los resultados observados durante la ejecución de las pruebas:
+
+| ID | Escenario de Prueba | Usuarios (U) | Rampa (R) | Duración | Total Reqs | Fallos (%) | RPS | Media (ms) | P95 (ms) | Resultado Esperado vs Observado | Estado |
+| :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :--- | :---: |
+| **PR01** | Enrutamiento repetido a Productos | 1 | 1 | 30s | - | 0% | - | - | - | Reenvío directo exitoso sin overhead | [ ] APROBADO |
+| **PR02** | Enrutamiento concurrente a 5 servicios | 5 | 1 | 45s | - | 0% | - | - | - | Reenvío balanceado y propagación de identidad | [ ] APROBADO |
+| **PR03** | Incremento progresivo de carga (1-10) | 10 | 1 | 60s | - | 0% | - | - | - | Rampa lineal estable sin degradación súbita | [ ] APROBADO |
+| **PR04** | Pico repentino de solicitudes | 10 | 10 | 30s | - | 0% | - | - | - | Absorción del pico y estabilización rápida | [ ] APROBADO |
+| **PR05** | Destino no disponible (Resiliencia) | 5 | 1 | 30s | - | 0% | - | - | - | Respuestas 503 controladas sin caída del Gateway | [ ] APROBADO |
+| **PR06** | Listado paginado de usuarios | 1 | 1 | 30s | - | 0% | - | - | - | Paginado ágil con verificación de roles | [ ] APROBADO |
+| **PR07** | Perfiles distintos concurrentes | 5 | 2 | 30s | - | 0% | - | - | - | Respuestas íntegras sin datos cruzados | [ ] APROBADO |
+| **PR08** | Creación concurrente de 10 cuentas | 5 | 2 | 30s | - | 0% | - | - | - | Creación exitosa (201) con password hasheada | [ ] APROBADO |
+| **PR09** | Creación con correo repetido | 5 | 5 | 20s | - | 0%* | - | - | - | 1 creado (201) y 4 conflictos (409) validados | [ ] APROBADO |
+| **PR10** | Actualización concurrente perfiles | 5 | 2 | 30s | - | 0% | - | - | - | Actualización consistente en base de datos | [ ] APROBADO |
+| **PR11** | Inicio de sesión concurrente (Login) | 5 | 2 | 45s | - | 0% | - | - | - | Emisión concurrente de JWT y Refresh Tokens | [ ] APROBADO |
+| **PR12** | Consultas concurrentes a `/me` | 5 | 2 | 45s | - | 0% | - | - | - | Verificación de firma JWT y lectura de sesión | [ ] APROBADO |
+| **PR13** | Renovación y rechazo token rotado | 5 | 2 | 45s | - | 0%* | - | - | - | Nuevo par emitido y token anterior revocado (401) | [ ] APROBADO |
+| **PR14** | Rate limit en login vs cuenta válida | 2 | 1 | 30s | - | 0%* | - | - | - | Bloqueo 429 en cuenta atacada, ingreso normal en la otra | [ ] APROBADO |
+| **PR15** | Ciclo completo repetido (10 ciclos) | 5 | 2 | 60s | - | 0%* | - | - | - | Flujo completo válido e invalidación tras logout | [ ] APROBADO |
+
+*\*Nota: En Locust, las respuestas `409 Conflict` (PR09), `401 Unauthorized` ante tokens revocados/rotados (PR13, PR15), `429 Too Many Requests` (PR14) y `503/502` ante servicios caídos (PR05) son evaluadas con `catch_response=True` y marcadas como **éxitos esperados** de seguridad y resiliencia.*
 
 ---
 
-## 6. Verificación de Criterios de Integridad
+## 6. Criterios de Aceptación (SLA)
 
-- **Cero Stock Negativo:** Toda operación de descuento o traslado utiliza `with_for_update()` en transacciones ACID; cuando el stock disponible es insuficiente, el servicio responde `409 Conflict` sin decrementar bajo cero.
-- **Idempotencia Garantizada:** El identificador `operacion_id` previene cobros, descuentos o reintegros duplicados en caso de reintentos o cargas extremas.
-- **Compensación Automática:** Si la confirmación de una venta falla en algún ítem, las unidades previamente descontadas se compensan automáticamente en Inventario.
+1. **Latencia del Gateway:**
+   - Tiempo de respuesta medio (`Avg`) menor a **50 ms** para peticiones internas de autenticación y salud bajo carga nominal.
+   - Percentil 95 (`P95`) menor a **150 ms** para consultas concurrentes.
+2. **Disponibilidad y Concurrencia:**
+   - 0% de errores `500 Internal Server Error` no controlados.
+   - 0% de fugas de memoria o caídas del proceso nativo de Node.js durante los picos de carga.
+3. **Seguridad y Resiliencia:**
+   - Activación precisa del límite de tasa (`429`) tras 5 intentos fallidos en una misma cuenta, sin afectar a otros usuarios.
+   - Aislamiento total ante la caída de un microservicio destino (retorno controlado de `503 Service Unavailable`).
