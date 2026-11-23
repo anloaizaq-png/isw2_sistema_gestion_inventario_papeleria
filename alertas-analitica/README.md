@@ -25,11 +25,15 @@ alertas-analitica/
 ├── app.py              Aplicación Flask, formato de errores y ruta /salud
 ├── config.py           Lectura de variables de entorno
 ├── database.py         Conexión y consultas a MySQL
+├── clientes/
+│   ├── inventario.py   Consulta el stock en Inventario
+│   └── ventas.py       Consulta las ventas confirmadas en Ventas y Pedidos
 ├── rutas/
 │   ├── umbrales.py     /api/alertas/umbrales
 │   ├── temporadas.py   /api/alertas/temporadas
-│   ├── alertas.py      /api/alertas/
-│   └── sugerencias.py  /api/alertas/sugerencias-reabastecimiento
+│   ├── alertas.py      /api/alertas/ (incluye /evaluar)
+│   ├── sugerencias.py  /api/alertas/sugerencias-reabastecimiento
+│   └── analitica.py    /api/alertas/analitica/...
 ├── db/schema.sql       Creación de la base de datos y sus 6 tablas
 ├── requirements.txt    Dependencias
 ├── .env.example        Ejemplo de variables de entorno
@@ -62,16 +66,16 @@ El contrato completo está en el contrato OpenAPI del servicio (Entrega 2).
 | GET | `/api/alertas/` | Implementado |
 | GET | `/api/alertas/{id}` | Implementado |
 | PATCH | `/api/alertas/{id}/estado` | Implementado |
-| POST | `/api/alertas/evaluar` | Pendiente (requiere Inventario) |
+| POST | `/api/alertas/evaluar` | Implementado |
 | GET, POST | `/api/alertas/umbrales` | Implementado |
 | PUT, DELETE | `/api/alertas/umbrales/{id}` | Implementado |
 | GET, POST | `/api/alertas/temporadas` | Implementado |
 | PUT, DELETE | `/api/alertas/temporadas/{id}` | Implementado |
-| GET | `/api/alertas/analitica/rotacion` | Pendiente (requiere Ventas) |
-| GET | `/api/alertas/analitica/clasificacion-abc` | Pendiente (requiere Ventas) |
-| GET | `/api/alertas/analitica/proximos-agotarse` | Pendiente (requiere Inventario) |
-| GET | `/api/alertas/analitica/sin-movimiento` | Pendiente (requiere Ventas) |
-| GET | `/api/alertas/analitica/demanda-temporada` | Pendiente (requiere Ventas) |
+| GET | `/api/alertas/analitica/rotacion` | Implementado |
+| GET | `/api/alertas/analitica/clasificacion-abc` | Implementado |
+| GET | `/api/alertas/analitica/proximos-agotarse` | Implementado |
+| GET | `/api/alertas/analitica/sin-movimiento` | Implementado |
+| GET | `/api/alertas/analitica/demanda-temporada` | Implementado |
 | GET | `/api/alertas/sugerencias-reabastecimiento` | Implementado |
 | PATCH | `/api/alertas/sugerencias-reabastecimiento/{id}/estado` | Implementado |
 
@@ -84,16 +88,19 @@ Los errores responden con el formato `{"codigo": 404, "mensaje": "..."}`.
 
 **API Gateway (Wendy).** El Gateway valida el token y los permisos y reenvía las rutas
 `/api/alertas/...` sin cambios a `http://analitica-service:8080`. Si envía el encabezado
-`X-Usuario-Id` con el id del usuario autenticado, el servicio lo guarda como
+`X-User-Id` (el mismo que usan los demás servicios) con el id del usuario autenticado, el servicio lo guarda como
 `usuario_atencion_id` al cambiar el estado de una alerta; si no lo envía, el campo queda vacío.
 
 **Inventario y Ventas y Pedidos (Ana).** El servicio los consulta directamente por sus
-direcciones internas (Entrega 2, sección 1.2). Necesita:
+direcciones internas (Entrega 2, sección 1.2), nunca accediendo a sus bases de datos:
 
-- De Inventario: el stock actual por producto (y por bodega, si aplica).
-- De Ventas y Pedidos: las unidades vendidas por producto en un rango de fechas.
+| Servicio | Ruta consumida | Uso |
+|---|---|---|
+| Inventario | `GET {INVENTARIO_URL}/api/inventario/stock` | Stock por producto y bodega (`evaluar`, rotación, próximos a agotarse, sin movimiento) |
+| Ventas y Pedidos | `GET {VENTAS_URL}/api/ventas?estado=confirmada&fecha_inicio=...&fecha_fin=...` | Unidades e ingresos por producto (rotación, ABC, sin movimiento, demanda por temporada) |
 
-Las rutas exactas se agregarán cuando estén definidas.
+Si alguno no responde, el endpoint que lo necesita responde `503`; si su respuesta no tiene
+el formato esperado, responde `502`.
 
 **Proveedores y Compras (Angie).** Consume `GET /api/alertas/sugerencias-reabastecimiento`
 y, al generar una orden de compra, `PATCH /api/alertas/sugerencias-reabastecimiento/{id}/estado`
@@ -106,7 +113,20 @@ con `{"estado": "atendida", "orden_compra_id": ...}`.
 - **Estado de una sugerencia:** `atendida` guarda el `orden_compra_id` recibido; `pendiente`
   lo borra.
 - **Umbrales:** `DELETE` los desactiva (`activo = false`), no los borra.
-- **Fechas:** se guardan en UTC.
+- **Evaluación (`POST /evaluar`, RF09):** para cada umbral activo se toma el stock de su
+  bodega (o la suma de todas si no tiene bodega). Umbral aplicado = `stock_minimo` ×
+  multiplicador de la temporada vigente (1 si no hay), redondeado hacia arriba. Si el stock
+  es menor o igual, se crea una alerta `agotado` (stock 0) o `stock_bajo`, sin duplicar una
+  alerta pendiente o en gestión del mismo producto y tipo, junto con una sugerencia de
+  `2 × umbral aplicado − stock` unidades.
+- **Rotación:** unidades vendidas ÷ stock actual. Los productos vendidos se dividen en tercios
+  (`alta`, `media`, `baja`); los no vendidos son `baja`.
+- **Clasificación ABC:** ingresos del mes en curso; A hasta el 80 % acumulado, B hasta el 95 %,
+  C el resto. Se guarda en `clasificacion_producto` y `resumen_ventas_producto`.
+- **Próximos a agotarse:** stock por encima del umbral aplicado, pero no más de un 25 %.
+- **Sin movimiento:** productos con stock y sin ventas en los últimos `dias` (90 por defecto).
+- **Ventas consideradas:** solo las confirmadas; las devoluciones no se descuentan.
+- **Fechas:** se guardan y comparan en UTC.
 
 ## Ejecución local
 
