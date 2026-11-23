@@ -15,6 +15,7 @@ from werkzeug.exceptions import HTTPException
 
 from config import Config
 from database import consultar_uno
+from rutas.umbrales import bp as umbrales_bp
 
 
 class ProveedorJSON(DefaultJSONProvider):
@@ -51,6 +52,8 @@ def crear_app():
     # Acepta las rutas con y sin barra final (/api/alertas y /api/alertas/)
     # para que el Gateway no reciba redirecciones.
     app.url_map.strict_slashes = False
+
+    app.register_blueprint(umbrales_bp)
 
     @app.get("/salud")
     def salud():
