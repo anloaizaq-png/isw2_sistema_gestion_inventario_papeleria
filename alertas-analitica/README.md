@@ -22,7 +22,7 @@ reabastecimiento a Proveedores y Compras y calcula indicadores de rotación y cl
 
 ```
 alertas-analitica/
-├── app.py              Aplicación Flask, formato de errores y ruta /salud
+├── app.py              Aplicación Flask, formato de errores y ruta /health
 ├── config.py           Lectura de variables de entorno
 ├── database.py         Conexión y consultas a MySQL
 ├── clientes/
@@ -79,7 +79,7 @@ El contrato completo está en el contrato OpenAPI del servicio (Entrega 2).
 | GET | `/api/alertas/sugerencias-reabastecimiento` | Implementado |
 | PATCH | `/api/alertas/sugerencias-reabastecimiento/{id}/estado` | Implementado |
 
-Además, `GET /salud` (fuera del contrato y del Gateway) indica si el servicio y la base de
+Además, `GET /health` (fuera del contrato y del Gateway) indica si el servicio y la base de
 datos responden.
 
 Los errores responden con el formato `{"codigo": 404, "mensaje": "..."}`.
