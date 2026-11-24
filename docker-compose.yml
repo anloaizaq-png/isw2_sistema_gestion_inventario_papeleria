@@ -112,6 +112,7 @@ services:
       - DB_USER=${DB_INVENTARIO_USER:-inventario_user}
       - DB_PASSWORD=${DB_INVENTARIO_PASSWORD:-inventario_pass}
       - DB_NAME=${DB_INVENTARIO_NAME:-inventario}
+      - PRODUCTOS_URL=http://productos-service:8080
     depends_on:
       db-inventario:
         condition: service_healthy
@@ -136,6 +137,8 @@ services:
       - DB_USER=${DB_VENTAS_USER:-ventas_user}
       - DB_PASSWORD=${DB_VENTAS_PASSWORD:-ventas_pass}
       - DB_NAME=${DB_VENTAS_NAME:-ventas}
+      - PRODUCTOS_URL=http://productos-service:8080
+      - INVENTARIO_URL=http://inventario-service:8080
     depends_on:
       db-ventas:
         condition: service_healthy
@@ -160,6 +163,9 @@ services:
       - DB_USER=${DB_COMPRAS_USER:-compras_user}
       - DB_PASSWORD=${DB_COMPRAS_PASSWORD:-compras_pass}
       - DB_NAME=${DB_COMPRAS_NAME:-compras}
+      - PRODUCTOS_URL=http://productos-service:8080
+      - INVENTARIO_URL=http://inventario-service:8080
+      - ALERTAS_URL=http://analitica-service:8080
     depends_on:
       db-compras:
         condition: service_healthy
@@ -179,16 +185,25 @@ services:
       - "8080"
     environment:
       - PORT=8080
+      - APP_PORT=8080
       - DB_HOST=db-analitica
       - DB_PORT=3306
       - DB_USER=${DB_ANALITICA_USER:-analitica_user}
       - DB_PASSWORD=${DB_ANALITICA_PASSWORD:-analitica_pass}
       - DB_NAME=${DB_ANALITICA_NAME:-analitica}
+      - INVENTARIO_URL=http://inventario-service:8080
+      - VENTAS_URL=http://ventas-service:8080
     depends_on:
       db-analitica:
         condition: service_healthy
     networks:
       - cotton-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   # ===================================================================
   # BASES DE DATOS INDEPENDIENTES (MySQL 8 - Red interna cotton-net)
@@ -312,6 +327,7 @@ services:
       - MYSQL_PASSWORD=${DB_ANALITICA_PASSWORD:-analitica_pass}
     volumes:
       - db_analitica_data:/var/lib/mysql
+      - ./alertas-analitica/db:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p$${MYSQL_ROOT_PASSWORD}"]
       interval: 10s
