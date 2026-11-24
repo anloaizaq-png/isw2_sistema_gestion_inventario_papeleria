@@ -120,25 +120,36 @@ def cambiar_estado(alerta_id):
     #   en_gestion              -> se guarda quién la tomó, sin fecha
     #   atendida o descartada   -> se guarda quién la cerró y la fecha actual
     if estado == "pendiente":
-        ejecutar(
+        sql = (
             "UPDATE alerta SET estado = %s, usuario_atencion_id = NULL, "
-            "fecha_atencion = NULL WHERE id = %s",
-            (estado, alerta_id),
+            "fecha_atencion = NULL WHERE id = %s"
         )
+        parametros = (estado, alerta_id)
     elif estado == "en_gestion":
-        ejecutar(
+        sql = (
             "UPDATE alerta SET estado = %s, usuario_atencion_id = %s, "
-            "fecha_atencion = NULL WHERE id = %s",
-            (estado, usuario_id, alerta_id),
+            "fecha_atencion = NULL WHERE id = %s"
         )
+        parametros = (estado, usuario_id, alerta_id)
     else:
-        ejecutar(
+        sql = (
             "UPDATE alerta SET estado = %s, usuario_atencion_id = %s, "
-            "fecha_atencion = NOW() WHERE id = %s",
-            (estado, usuario_id, alerta_id),
+            "fecha_atencion = NOW() WHERE id = %s"
         )
+        parametros = (estado, usuario_id, alerta_id)
 
-    return jsonify(_buscar(alerta_id))
+    # Bloqueo de la fila (FOR UPDATE): si dos usuarios cambian la misma alerta
+    # a la vez, uno espera al otro y cada respuesta muestra exactamente lo que
+    # guardó esa petición (RF10, trazabilidad).
+    with transaccion() as cursor:
+        cursor.execute("SELECT id FROM alerta WHERE id = %s FOR UPDATE", (alerta_id,))
+        if cursor.fetchone() is None:
+            abort(404, "Alerta no encontrada")
+        cursor.execute(sql, parametros)
+        cursor.execute(f"SELECT {COLUMNAS} FROM alerta WHERE id = %s", (alerta_id,))
+        alerta = cursor.fetchone()
+
+    return jsonify(alerta)
 
 
 @bp.post("/evaluar")
