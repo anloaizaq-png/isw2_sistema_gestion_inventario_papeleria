@@ -1,0 +1,338 @@
+# =====================================================================
+# Docker Compose: Cotton Cloud Paper - Sistema de Gestión de Inventarios
+# Arquitectura de 6 Microservicios y 6 Bases de Datos Aisladas
+# =====================================================================
+
+name: cotton-cloud-paper
+
+networks:
+  cotton-net:
+    driver: bridge
+    name: cotton-net
+
+volumes:
+  db_identidad_data:
+    name: cotton_db_identidad_data
+  db_productos_data:
+    name: cotton_db_productos_data
+  db_inventario_data:
+    name: cotton_db_inventario_data
+  db_ventas_data:
+    name: cotton_db_ventas_data
+  db_compras_data:
+    name: cotton_db_compras_data
+  db_analitica_data:
+    name: cotton_db_analitica_data
+
+services:
+  # ===================================================================
+  # 1. API GATEWAY Y SERVICIO DE IDENTIDAD (Único con puerto expuesto)
+  # ===================================================================
+  gateway-service:
+    build:
+      context: ./api-gateway
+      dockerfile: Dockerfile
+    container_name: gateway-service
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - NODE_ENV=${NODE_ENV:-production}
+      - PORT=8080
+      - DB_HOST=db-identidad
+      - DB_PORT=3306
+      - DB_USER=${DB_IDENTIDAD_USER:-identidad_user}
+      - DB_PASSWORD=${DB_IDENTIDAD_PASSWORD:-identidad_pass}
+      - DB_NAME=${DB_IDENTIDAD_NAME:-identidad}
+      - JWT_SECRET=${JWT_SECRET:-cotton_cloud_super_secret_jwt_key_2024}
+      - JWT_EXPIRES_IN=${JWT_EXPIRES_IN:-15m}
+      - JWT_REFRESH_EXPIRES_IN=${JWT_REFRESH_EXPIRES_IN:-7d}
+      - JWT_ISSUER=${JWT_ISSUER:-cotton-cloud-gateway}
+      - JWT_AUDIENCE=${JWT_AUDIENCE:-cotton-cloud-services}
+      - ADMIN_NAME=${ADMIN_NAME:-Administrador Inicial}
+      - ADMIN_EMAIL=${ADMIN_EMAIL:-admin@cottoncloud.com}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-Admin1234*}
+      - PRODUCTOS_URL=http://productos-service:8080
+      - INVENTARIO_URL=http://inventario-service:8080
+      - VENTAS_URL=http://ventas-service:8080
+      - COMPRAS_URL=http://compras-service:8080
+      - ANALITICA_URL=http://analitica-service:8080
+      - PROXY_TIMEOUT_MS=${PROXY_TIMEOUT_MS:-10000}
+    depends_on:
+      db-identidad:
+        condition: service_healthy
+    networks:
+      - cotton-net
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  # ===================================================================
+  # 2. MICROSERVICIO DE PRODUCTOS (Red interna, sin puerto exterior)
+  # ===================================================================
+  productos-service:
+    build:
+      context: ./productos
+      dockerfile: Dockerfile
+    container_name: productos-service
+    restart: unless-stopped
+    expose:
+      - "8080"
+    environment:
+      - PORT=8080
+      - DB_HOST=db-productos
+      - DB_PORT=3306
+      - DB_USER=${DB_PRODUCTOS_USER:-productos_user}
+      - DB_PASSWORD=${DB_PRODUCTOS_PASSWORD:-productos_pass}
+      - DB_NAME=${DB_PRODUCTOS_NAME:-productos}
+    depends_on:
+      db-productos:
+        condition: service_healthy
+    networks:
+      - cotton-net
+
+  # ===================================================================
+  # 3. MICROSERVICIO DE INVENTARIO (Red interna, sin puerto exterior)
+  # ===================================================================
+  inventario-service:
+    build:
+      context: ./inventario
+      dockerfile: Dockerfile
+    container_name: inventario-service
+    restart: unless-stopped
+    expose:
+      - "8080"
+    environment:
+      - PORT=8080
+      - DB_HOST=db-inventario
+      - DB_PORT=3306
+      - DB_USER=${DB_INVENTARIO_USER:-inventario_user}
+      - DB_PASSWORD=${DB_INVENTARIO_PASSWORD:-inventario_pass}
+      - DB_NAME=${DB_INVENTARIO_NAME:-inventario}
+      - PRODUCTOS_URL=http://productos-service:8080
+    depends_on:
+      db-inventario:
+        condition: service_healthy
+    networks:
+      - cotton-net
+
+  # ===================================================================
+  # 4. MICROSERVICIO DE VENTAS Y PEDIDOS (Red interna, sin puerto exterior)
+  # ===================================================================
+  ventas-service:
+    build:
+      context: ./ventas-pedidos
+      dockerfile: Dockerfile
+    container_name: ventas-service
+    restart: unless-stopped
+    expose:
+      - "8080"
+    environment:
+      - PORT=8080
+      - DB_HOST=db-ventas
+      - DB_PORT=3306
+      - DB_USER=${DB_VENTAS_USER:-ventas_user}
+      - DB_PASSWORD=${DB_VENTAS_PASSWORD:-ventas_pass}
+      - DB_NAME=${DB_VENTAS_NAME:-ventas}
+      - PRODUCTOS_URL=http://productos-service:8080
+      - INVENTARIO_URL=http://inventario-service:8080
+    depends_on:
+      db-ventas:
+        condition: service_healthy
+    networks:
+      - cotton-net
+
+  # ===================================================================
+  # 5. MICROSERVICIO DE PROVEEDORES Y COMPRAS (Red interna, sin puerto exterior)
+  # ===================================================================
+  compras-service:
+    build:
+      context: ./proveedores-compras
+      dockerfile: Dockerfile
+    container_name: compras-service
+    restart: unless-stopped
+    expose:
+      - "8080"
+    environment:
+      - PORT=8080
+      - DB_HOST=db-compras
+      - DB_PORT=3306
+      - DB_USER=${DB_COMPRAS_USER:-compras_user}
+      - DB_PASSWORD=${DB_COMPRAS_PASSWORD:-compras_pass}
+      - DB_NAME=${DB_COMPRAS_NAME:-compras}
+      - PRODUCTOS_URL=http://productos-service:8080
+      - INVENTARIO_URL=http://inventario-service:8080
+      - ALERTAS_URL=http://analitica-service:8080
+    depends_on:
+      db-compras:
+        condition: service_healthy
+    networks:
+      - cotton-net
+
+  # ===================================================================
+  # 6. MICROSERVICIO DE ALERTAS Y ANALÍTICA (Red interna, sin puerto exterior)
+  # ===================================================================
+  analitica-service:
+    build:
+      context: ./alertas-analitica
+      dockerfile: Dockerfile
+    container_name: analitica-service
+    restart: unless-stopped
+    expose:
+      - "8080"
+    environment:
+      - PORT=8080
+      - APP_PORT=8080
+      - DB_HOST=db-analitica
+      - DB_PORT=3306
+      - DB_USER=${DB_ANALITICA_USER:-analitica_user}
+      - DB_PASSWORD=${DB_ANALITICA_PASSWORD:-analitica_pass}
+      - DB_NAME=${DB_ANALITICA_NAME:-analitica}
+      - INVENTARIO_URL=http://inventario-service:8080
+      - VENTAS_URL=http://ventas-service:8080
+    depends_on:
+      db-analitica:
+        condition: service_healthy
+    networks:
+      - cotton-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ===================================================================
+  # BASES DE DATOS INDEPENDIENTES (MySQL 8 - Red interna cotton-net)
+  # ===================================================================
+
+  # BD 1: Identidad (exclusiva de gateway-service)
+  db-identidad:
+    image: mysql:8.0
+    container_name: db-identidad
+    restart: unless-stopped
+    environment:
+      - MYSQL_ROOT_PASSWORD=${DB_IDENTIDAD_ROOT_PASSWORD:-root_pass_identidad}
+      - MYSQL_DATABASE=${DB_IDENTIDAD_NAME:-identidad}
+      - MYSQL_USER=${DB_IDENTIDAD_USER:-identidad_user}
+      - MYSQL_PASSWORD=${DB_IDENTIDAD_PASSWORD:-identidad_pass}
+    volumes:
+      - db_identidad_data:/var/lib/mysql
+      - ./api-gateway/sql:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p$${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - cotton-net
+
+  # BD 2: Productos
+  db-productos:
+    image: mysql:8.0
+    container_name: db-productos
+    restart: unless-stopped
+    environment:
+      - MYSQL_ROOT_PASSWORD=${DB_PRODUCTOS_ROOT_PASSWORD:-root_pass_productos}
+      - MYSQL_DATABASE=${DB_PRODUCTOS_NAME:-productos}
+      - MYSQL_USER=${DB_PRODUCTOS_USER:-productos_user}
+      - MYSQL_PASSWORD=${DB_PRODUCTOS_PASSWORD:-productos_pass}
+    volumes:
+      - db_productos_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p$${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - cotton-net
+
+  # BD 3: Inventario
+  db-inventario:
+    image: mysql:8.0
+    container_name: db-inventario
+    restart: unless-stopped
+    environment:
+      - MYSQL_ROOT_PASSWORD=${DB_INVENTARIO_ROOT_PASSWORD:-root_pass_inventario}
+      - MYSQL_DATABASE=${DB_INVENTARIO_NAME:-inventario}
+      - MYSQL_USER=${DB_INVENTARIO_USER:-inventario_user}
+      - MYSQL_PASSWORD=${DB_INVENTARIO_PASSWORD:-inventario_pass}
+    volumes:
+      - db_inventario_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p$${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - cotton-net
+
+  # BD 4: Ventas
+  db-ventas:
+    image: mysql:8.0
+    container_name: db-ventas
+    restart: unless-stopped
+    environment:
+      - MYSQL_ROOT_PASSWORD=${DB_VENTAS_ROOT_PASSWORD:-root_pass_ventas}
+      - MYSQL_DATABASE=${DB_VENTAS_NAME:-ventas}
+      - MYSQL_USER=${DB_VENTAS_USER:-ventas_user}
+      - MYSQL_PASSWORD=${DB_VENTAS_PASSWORD:-ventas_pass}
+    volumes:
+      - db_ventas_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p$${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - cotton-net
+
+  # BD 5: Compras
+  db-compras:
+    image: mysql:8.0
+    container_name: db-compras
+    restart: unless-stopped
+    environment:
+      - MYSQL_ROOT_PASSWORD=${DB_COMPRAS_ROOT_PASSWORD:-root_pass_compras}
+      - MYSQL_DATABASE=${DB_COMPRAS_NAME:-compras}
+      - MYSQL_USER=${DB_COMPRAS_USER:-compras_user}
+      - MYSQL_PASSWORD=${DB_COMPRAS_PASSWORD:-compras_pass}
+    volumes:
+      - db_compras_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p$${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - cotton-net
+
+  # BD 6: Analítica
+  db-analitica:
+    image: mysql:8.0
+    container_name: db-analitica
+    restart: unless-stopped
+    environment:
+      - MYSQL_ROOT_PASSWORD=${DB_ANALITICA_ROOT_PASSWORD:-root_pass_analitica}
+      - MYSQL_DATABASE=${DB_ANALITICA_NAME:-analitica}
+      - MYSQL_USER=${DB_ANALITICA_USER:-analitica_user}
+      - MYSQL_PASSWORD=${DB_ANALITICA_PASSWORD:-analitica_pass}
+    volumes:
+      - db_analitica_data:/var/lib/mysql
+      - ./alertas-analitica/db:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p$${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - cotton-net
