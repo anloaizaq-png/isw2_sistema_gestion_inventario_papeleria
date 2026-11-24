@@ -26,7 +26,7 @@ Cubre los 15 escenarios exactos definidos en la especificación técnica:
 import os
 import uuid
 import itertools
-from locust import HttpUser, task, between, tag, SequentialTaskSet
+from locust import HttpUser, task, between, tag
 
 # Configuración por variables de entorno con valores por defecto del sistema
 GATEWAY_URL = os.getenv("GATEWAY_URL", "http://localhost:8080")
@@ -38,42 +38,48 @@ _counter = itertools.count(start=1)
 
 
 class BaseGatewayUser(HttpUser):
-    """Clase base con utilidades de autenticación para clientes del Gateway"""
+    """
+    Clase base abstracta con utilidades de autenticación y configuración común.
+    Marcada como abstract = True para que Locust no intente ejecutarla como usuario activo.
+    """
+    abstract = True
+    host = GATEWAY_URL
     wait_time = between(0.1, 0.5)
 
-    def login_as_admin(self):
-        """Inicia sesión con credenciales de administrador y retorna tokens"""
+    _cached_admin_token = None
+
+    def get_admin_token(self):
+        """Obtiene o reutiliza el token de administrador para peticiones protegidas"""
+        if self._cached_admin_token:
+            return self._cached_admin_token
+
         payload = {"correo": ADMIN_EMAIL, "password": ADMIN_PASSWORD}
         resp = self.client.post("/api/auth/login", json=payload, name="/api/auth/login [Setup Admin]")
         if resp.status_code == 200:
             data = resp.json().get("data", {})
-            return data.get("accessToken"), data.get("refreshToken")
-        return None, None
+            self._cached_admin_token = data.get("accessToken")
+            return self._cached_admin_token
+        return None
 
 
-# =============================================================================
-# BLOQUE 1: ENRUTAMIENTO, CARGA Y RESILIENCIA (PR01 - PR05)
-# =============================================================================
-
-class RoutingAndResilienceUser(BaseGatewayUser):
+class GatewayUser(BaseGatewayUser):
     """
-    Escenarios de Enrutamiento Inverso, Carga y Aislamiento de Fallos
-    Tags: PR01, PR02, PR03, PR04, PR05
+    Usuario principal del API Gateway que agrupa los 15 escenarios (PR01 a PR15).
+    Permite filtrar la ejecución por escenario mediante tags (--tags PR01, --tags PR14, etc.)
+    o ejecutar toda la suite de forma integral.
     """
-    access_token = None
 
-    def on_start(self):
-        self.access_token, _ = self.login_as_admin()
+    # -------------------------------------------------------------------------
+    # BLOQUE 1: ENRUTAMIENTO, CARGA Y RESILIENCIA (PR01 - PR05)
+    # -------------------------------------------------------------------------
 
     @tag("PR01")
-    @task(3)
+    @task(2)
     def pr01_enrutamiento_repetido_productos(self):
         """PR01: Enrutamiento repetido a Productos vía Gateway (Pass-through)"""
-        headers = {}
-        if self.access_token:
-            headers["Authorization"] = f"Bearer {self.access_token}"
+        token = self.get_admin_token()
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
 
-        # GET /api/productos puede ser público o autenticado
         with self.client.get(
             "/api/productos",
             headers=headers,
@@ -90,9 +96,8 @@ class RoutingAndResilienceUser(BaseGatewayUser):
     @task(2)
     def pr02_enrutamiento_concurrente_cinco_servicios(self):
         """PR02: Enrutamiento concurrente distribuido en los 5 microservicios"""
-        headers = {}
-        if self.access_token:
-            headers["Authorization"] = f"Bearer {self.access_token}"
+        token = self.get_admin_token()
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
 
         endpoints = [
             ("/api/productos", "productos-service"),
@@ -109,7 +114,6 @@ class RoutingAndResilienceUser(BaseGatewayUser):
                 name=f"{path} [PR02: Multi-Service]",
                 catch_response=True
             ) as resp:
-                # Si el servicio está arriba retorna 200; si aún no tiene contenedor retorna 503 controlado
                 if resp.status_code in (200, 503):
                     resp.success()
                 else:
@@ -132,54 +136,40 @@ class RoutingAndResilienceUser(BaseGatewayUser):
         PR05: Resiliencia ante servicio detenido y verificación de no afectación del Gateway.
         Consulta un servicio detenido (esperando 503/502 controlado) y el Gateway activo (200).
         """
-        headers = {}
-        if self.access_token:
-            headers["Authorization"] = f"Bearer {self.access_token}"
+        token = self.get_admin_token()
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
 
-        # 1. Petición a servicio no disponible (ej. analítica detenido)
+        # 1. Petición a servicio no disponible (esperando 503/502 controlado)
         with self.client.get(
             "/api/alertas/metricas-offline",
             headers=headers,
             name="/api/alertas [PR05: Servicio Caído - 503]",
             catch_response=True
         ) as resp_down:
-            if resp_down.status_code in (502, 503):
-                # Es el resultado esperado de resiliencia
-                resp_down.success()
-            elif resp_down.status_code == 200:
+            if resp_down.status_code in (502, 503, 200):
                 resp_down.success()
             else:
                 resp_down.failure(f"Código inesperado ante servicio caído: {resp_down.status_code}")
 
-        # 2. Inmediatamente verificar que el Gateway sigue respondiendo normalmente (aislamiento de fallos)
+        # 2. Inmediatamente verificar que el Gateway sigue respondiendo (aislamiento)
         with self.client.get("/health", name="/health [PR05: Gateway Sigue Activo]", catch_response=True) as resp_alive:
             if resp_alive.status_code == 200:
                 resp_alive.success()
             else:
-                resp_alive.failure("El Gateway colapsó ante falla de un servicio destino")
+                resp_alive.failure("El Gateway colapsó ante falla de un microservicio destino")
 
-
-# =============================================================================
-# BLOQUE 2: GESTIÓN DE USUARIOS Y ROLES (PR06 - PR10)
-# =============================================================================
-
-class UserManagementUser(BaseGatewayUser):
-    """
-    Escenarios de Administración de Usuarios, Paginación, Unicidad y Concurrencia
-    Tags: PR06, PR07, PR08, PR09, PR10
-    """
-    access_token = None
-
-    def on_start(self):
-        self.access_token, _ = self.login_as_admin()
+    # -------------------------------------------------------------------------
+    # BLOQUE 2: GESTIÓN DE USUARIOS Y ROLES (PR06 - PR10)
+    # -------------------------------------------------------------------------
 
     @tag("PR06")
-    @task(3)
+    @task(2)
     def pr06_listado_paginado_usuarios(self):
         """PR06: Listado paginado repetido de usuarios (20 consultas admin)"""
-        if not self.access_token:
+        token = self.get_admin_token()
+        if not token:
             return
-        headers = {"Authorization": f"Bearer {self.access_token}"}
+        headers = {"Authorization": f"Bearer {token}"}
         with self.client.get(
             "/api/usuarios?page=1&limit=5",
             headers=headers,
@@ -195,10 +185,10 @@ class UserManagementUser(BaseGatewayUser):
     @task(2)
     def pr07_consulta_concurrente_perfiles_distintos(self):
         """PR07: Consulta concurrente de perfiles distintos (verificar no mezcla de datos)"""
-        if not self.access_token:
+        token = self.get_admin_token()
+        if not token:
             return
-        headers = {"Authorization": f"Bearer {self.access_token}"}
-        # Consultar usuario ID 1 (Admin)
+        headers = {"Authorization": f"Bearer {token}"}
         with self.client.get("/api/usuarios/1", headers=headers, name="/api/usuarios/1 [PR07: Perfil Admin]", catch_response=True) as resp:
             if resp.status_code == 200:
                 data = resp.json().get("data", {})
@@ -213,9 +203,10 @@ class UserManagementUser(BaseGatewayUser):
     @task(1)
     def pr08_creacion_concurrente_cuentas_distintas(self):
         """PR08: Creación concurrente de cuentas distintas desde clientes admin"""
-        if not self.access_token:
+        token = self.get_admin_token()
+        if not token:
             return
-        headers = {"Authorization": f"Bearer {self.access_token}"}
+        headers = {"Authorization": f"Bearer {token}"}
         uid = next(_counter)
         payload = {
             "nombre": f"Usuario Prueba {uid}",
@@ -228,19 +219,19 @@ class UserManagementUser(BaseGatewayUser):
             if resp.status_code == 201:
                 resp.success()
             else:
-                resp.failure(f"Error creando cuenta única: {resp.status_code} - {resp.text}")
+                resp.failure(f"Error creando cuenta única: {resp.status_code}")
 
     @tag("PR09")
     @task(1)
     def pr09_creacion_concurrente_correo_repetido(self):
         """
         PR09: Creación concurrente con correo repetido.
-        Se envía el mismo correo fijo simultáneamente: exactamente 1 debe dar 201 y el resto 409 Conflict.
+        Se envía el mismo correo: exactamente 1 debe dar 201 y el resto 409 Conflict.
         """
-        if not self.access_token:
+        token = self.get_admin_token()
+        if not token:
             return
-        headers = {"Authorization": f"Bearer {self.access_token}"}
-        # Correo compartido constante para probar condición de carrera y unicidad
+        headers = {"Authorization": f"Bearer {token}"}
         payload = {
             "nombre": "Usuario Duplicado",
             "correo": "correo_conflicto_pr09@cottoncloud.com",
@@ -249,11 +240,8 @@ class UserManagementUser(BaseGatewayUser):
             "roles": ["ANALISTA"]
         }
         with self.client.post("/api/usuarios", json=payload, headers=headers, name="/api/usuarios [PR09: Conflicto 409]", catch_response=True) as resp:
-            if resp.status_code == 201:
-                # Primera creación exitosa
-                resp.success()
-            elif resp.status_code == 409:
-                # Rechazo controlado obligatorio ante duplicados
+            if resp.status_code in (201, 409):
+                # 201 en la primera inserción y 409 en los intentos duplicados son válidos
                 resp.success()
             else:
                 resp.failure(f"Código inesperado en prueba de duplicado: {resp.status_code}")
@@ -262,9 +250,10 @@ class UserManagementUser(BaseGatewayUser):
     @task(1)
     def pr10_actualizacion_concurrente_perfiles(self):
         """PR10: Actualización concurrente de perfiles desde clientes admin"""
-        if not self.access_token:
+        token = self.get_admin_token()
+        if not token:
             return
-        headers = {"Authorization": f"Bearer {self.access_token}"}
+        headers = {"Authorization": f"Bearer {token}"}
         payload = {
             "nombre": f"Admin Actualizado {uuid.uuid4().hex[:4]}"
         }
@@ -274,20 +263,12 @@ class UserManagementUser(BaseGatewayUser):
             else:
                 resp.failure(f"Falla actualizando perfil: {resp.status_code}")
 
-
-# =============================================================================
-# BLOQUE 3: AUTENTICACIÓN, TOKENS, RATE LIMIT Y CICLO DE VIDA (PR11 - PR15)
-# =============================================================================
-
-class AuthAndTokensUser(HttpUser):
-    """
-    Escenarios de Autenticación, Sesiones, Rotación/Revocación y Rate Limit
-    Tags: PR11, PR12, PR13, PR14, PR15
-    """
-    wait_time = between(0.1, 0.5)
+    # -------------------------------------------------------------------------
+    # BLOQUE 3: AUTENTICACIÓN, TOKENS, RATE LIMIT Y CICLO DE VIDA (PR11 - PR15)
+    # -------------------------------------------------------------------------
 
     @tag("PR11")
-    @task(3)
+    @task(2)
     def pr11_inicio_sesion_concurrente(self):
         """PR11: Inicio de sesión concurrente con cuentas del sistema"""
         payload = {
@@ -304,7 +285,6 @@ class AuthAndTokensUser(HttpUser):
     @task(2)
     def pr12_consultas_concurrentes_me(self):
         """PR12: Consultas concurrentes a GET /api/auth/me con sesiones activas independientes"""
-        # 1. Login previo para obtener sesión propia
         login_resp = self.client.post("/api/auth/login", json={"correo": ADMIN_EMAIL, "password": ADMIN_PASSWORD})
         if login_resp.status_code != 200:
             return
@@ -318,19 +298,18 @@ class AuthAndTokensUser(HttpUser):
                 resp.failure(f"Falla en /me concurrente: {resp.status_code}")
 
     @tag("PR13")
-    @task(2)
+    @task(1)
     def pr13_renovacion_concurrente_y_rechazo_token_rotado(self):
         """
         PR13: Renovación concurrente (POST /api/auth/refresh) + verificación
         obligatoria de rechazo (401) del refresh token anterior que fue rotado.
         """
-        # 1. Iniciar sesión y obtener par de tokens
         login_resp = self.client.post("/api/auth/login", json={"correo": ADMIN_EMAIL, "password": ADMIN_PASSWORD})
         if login_resp.status_code != 200:
             return
         old_refresh_token = login_resp.json().get("data", {}).get("refreshToken")
 
-        # 2. Ejecutar rotación de token (Refresh)
+        # Rotación de token
         with self.client.post(
             "/api/auth/refresh",
             json={"refreshToken": old_refresh_token},
@@ -343,7 +322,7 @@ class AuthAndTokensUser(HttpUser):
                 refresh_resp.failure(f"Fallo en refresh válido: {refresh_resp.status_code}")
                 return
 
-        # 3. Intentar reutilizar inmediatamente el refresh token anterior (debe ser rechazado con 401)
+        # Intentar reutilizar inmediatamente el refresh token anterior (debe retornar 401)
         with self.client.post(
             "/api/auth/refresh",
             json={"refreshToken": old_refresh_token},
@@ -351,10 +330,9 @@ class AuthAndTokensUser(HttpUser):
             catch_response=True
         ) as reuse_resp:
             if reuse_resp.status_code == 401:
-                # 401 es el resultado de seguridad esperado
                 reuse_resp.success()
             else:
-                reuse_resp.failure(f"Falla de seguridad: el token anterior rotado no fue rechazado ({reuse_resp.status_code})")
+                reuse_resp.failure(f"Falla de seguridad: el token rotado no fue rechazado ({reuse_resp.status_code})")
 
     @tag("PR14")
     @task(1)
@@ -365,15 +343,15 @@ class AuthAndTokensUser(HttpUser):
         """
         target_account = f"victima_fuerzabruta_{uuid.uuid4().hex[:6]}@cottoncloud.com"
 
-        # 1. Disparar 5 intentos fallidos consecutivos en la cuenta objetivo
-        for i in range(5):
+        # Disparar 5 intentos fallidos consecutivos en la cuenta objetivo
+        for _ in range(5):
             self.client.post(
                 "/api/auth/login",
                 json={"correo": target_account, "password": "WrongPassword123*"},
                 name="/api/auth/login [PR14: Intento Fallido]"
             )
 
-        # 2. El 6to intento sobre esa cuenta debe retornar 429 Too Many Requests
+        # El 6to intento sobre esa cuenta debe retornar 429 Too Many Requests
         with self.client.post(
             "/api/auth/login",
             json={"correo": target_account, "password": "WrongPassword123*"},
@@ -385,7 +363,7 @@ class AuthAndTokensUser(HttpUser):
             else:
                 blocked_resp.failure(f"No se activó el rate limit tras 5 fallos: {blocked_resp.status_code}")
 
-        # 3. Verificar que otra cuenta válida NO está bloqueada e ingresa normal (aislamiento por cuenta)
+        # Verificar que otra cuenta válida NO está bloqueada e ingresa normal
         with self.client.post(
             "/api/auth/login",
             json={"correo": ADMIN_EMAIL, "password": ADMIN_PASSWORD},
@@ -401,10 +379,14 @@ class AuthAndTokensUser(HttpUser):
     @task(1)
     def pr15_ciclo_completo_repetido(self):
         """
-        PR15: Ciclo completo repetido (Login -> /me -> Refresh -> Logout -> Intento token revocado).
+        PR15: Ciclo completo repetido (Login -> /me -> Refresh -> Logout -> Reuso de sesión revocada).
         """
         # Paso 1: Login
-        login_res = self.client.post("/api/auth/login", json={"correo": ADMIN_EMAIL, "password": ADMIN_PASSWORD}, name="/api/auth/login [PR15: Step 1 Login]")
+        login_res = self.client.post(
+            "/api/auth/login",
+            json={"correo": ADMIN_EMAIL, "password": ADMIN_PASSWORD},
+            name="/api/auth/login [PR15: Step 1 Login]"
+        )
         if login_res.status_code != 200:
             return
         data = login_res.json().get("data", {})
@@ -416,7 +398,11 @@ class AuthAndTokensUser(HttpUser):
         self.client.get("/api/auth/me", headers=headers, name="/api/auth/me [PR15: Step 2 Me]")
 
         # Paso 3: Refresh con rotación
-        refresh_res = self.client.post("/api/auth/refresh", json={"refreshToken": refresh_token}, name="/api/auth/refresh [PR15: Step 3 Refresh]")
+        refresh_res = self.client.post(
+            "/api/auth/refresh",
+            json={"refreshToken": refresh_token},
+            name="/api/auth/refresh [PR15: Step 3 Refresh]"
+        )
         if refresh_res.status_code == 200:
             new_data = refresh_res.json().get("data", {})
             new_access_token = new_data.get("accessToken")
@@ -425,8 +411,13 @@ class AuthAndTokensUser(HttpUser):
         # Paso 4: Logout autenticado
         self.client.post("/api/auth/logout", headers=headers, name="/api/auth/logout [PR15: Step 4 Logout]")
 
-        # Paso 5: Intento de uso de token tras logout (debe ser rechazado con 401)
-        with self.client.get("/api/auth/me", headers=headers, name="/api/auth/me [PR15: Step 5 Rechazo Revocado]", catch_response=True) as revoked_check:
+        # Paso 5: Intento de uso de token tras logout (debe retornar 401)
+        with self.client.get(
+            "/api/auth/me",
+            headers=headers,
+            name="/api/auth/me [PR15: Step 5 Rechazo Revocado]",
+            catch_response=True
+        ) as revoked_check:
             if revoked_check.status_code == 401:
                 revoked_check.success()
             else:
