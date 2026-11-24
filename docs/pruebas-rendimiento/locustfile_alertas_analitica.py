@@ -11,9 +11,12 @@ Variables de entorno (opcionales):
 
 Antes de iniciar, el test crea (si no existen) umbrales para esos productos y una
 temporada llamada "PERF Temporada", y ejecuta una evaluación para tener alertas.
+Si el servicio no responde, reintenta hasta 5 veces. Si aun así no hay alertas,
+A03 y A04 registran un fallo "sin datos de prueba" en lugar de consultar ids falsos.
 """
 import os
 import random
+import time
 import uuid
 from datetime import date, datetime, timezone
 
@@ -45,45 +48,77 @@ def _hoy():
 # ---------------------------------------------------------------------------
 # Preparación de datos de prueba (idempotente)
 # ---------------------------------------------------------------------------
+def _get_json(url, params=None):
+    """GET que exige respuesta 200; si no, lanza un error para reintentar."""
+    r = requests.get(url, params=params, timeout=10)
+    if r.status_code != 200:
+        raise RuntimeError(f"GET {url} respondió {r.status_code}")
+    return r.json()
+
+
+def _preparar():
+    # Umbrales para los productos de prueba (solo si el producto aún no tiene uno activo)
+    umbrales = _get_json(f"{ALERTAS_HOST}/api/alertas/umbrales")
+    con_umbral = {u["producto_id"] for u in umbrales if u["activo"]}
+    for producto_id in PRODUCTOS_PERF:
+        if producto_id not in con_umbral:
+            requests.post(
+                f"{ALERTAS_HOST}/api/alertas/umbrales",
+                json={"producto_id": producto_id, "stock_minimo": 5},
+                timeout=10,
+            )
+
+    # Temporada de prueba que cubre el mes en curso
+    temporadas = _get_json(f"{ALERTAS_HOST}/api/alertas/temporadas")
+    existente = next((t for t in temporadas if t["nombre"] == "PERF Temporada"), None)
+    if existente is None:
+        hoy = _hoy()
+        r = requests.post(
+            f"{ALERTAS_HOST}/api/alertas/temporadas",
+            json={
+                "nombre": "PERF Temporada",
+                "fecha_inicio": hoy.replace(day=1).isoformat(),
+                "fecha_fin": date(hoy.year, 12, 31).isoformat(),
+                "multiplicador": 1,
+            },
+            timeout=10,
+        )
+        if r.status_code != 201:
+            raise RuntimeError(f"No se pudo crear la temporada: HTTP {r.status_code}")
+        existente = r.json()
+    DATOS["temporada"] = existente["id"]
+
+    # Una evaluación para que existan alertas y sugerencias (si Inventario responde)
+    requests.post(f"{ALERTAS_HOST}/api/alertas/evaluar", timeout=10)
+    alertas = _get_json(f"{ALERTAS_HOST}/api/alertas/", params={"limite": 100})
+    DATOS["alertas"] = [a["id"] for a in alertas["items"]]
+
+
 @events.test_start.add_listener
 def preparar_datos(environment, **kwargs):
-    try:
-        # Umbrales para los productos de prueba (solo si el producto aún no tiene uno activo)
-        umbrales = requests.get(f"{ALERTAS_HOST}/api/alertas/umbrales", timeout=10).json()
-        con_umbral = {u["producto_id"] for u in umbrales if u["activo"]}
-        for producto_id in PRODUCTOS_PERF:
-            if producto_id not in con_umbral:
-                requests.post(
-                    f"{ALERTAS_HOST}/api/alertas/umbrales",
-                    json={"producto_id": producto_id, "stock_minimo": 5},
-                    timeout=10,
-                )
+    for intento in range(1, 6):
+        try:
+            _preparar()
+            print(f"[datos de prueba] alertas={len(DATOS['alertas'])} temporada={DATOS['temporada']}")
+            if not DATOS["alertas"]:
+                print("[ADVERTENCIA] No hay alertas: A03 y A04 registrarán fallos 'sin datos de prueba'.")
+            return
+        except Exception as exc:  # noqa: BLE001
+            print(f"[ADVERTENCIA] Intento {intento}/5 de preparar los datos falló: {exc}")
+            time.sleep(2)
+    print("[ERROR] No se pudieron preparar los datos de prueba.")
 
-        # Temporada de prueba que cubre el mes en curso
-        temporadas = requests.get(f"{ALERTAS_HOST}/api/alertas/temporadas", timeout=10).json()
-        existente = next((t for t in temporadas if t["nombre"] == "PERF Temporada"), None)
-        if existente is None:
-            hoy = _hoy()
-            existente = requests.post(
-                f"{ALERTAS_HOST}/api/alertas/temporadas",
-                json={
-                    "nombre": "PERF Temporada",
-                    "fecha_inicio": hoy.replace(day=1).isoformat(),
-                    "fecha_fin": date(hoy.year, 12, 31).isoformat(),
-                    "multiplicador": 1,
-                },
-                timeout=10,
-            ).json()
-        DATOS["temporada"] = existente["id"]
 
-        # Una evaluación para que existan alertas y sugerencias (si Inventario responde)
-        requests.post(f"{ALERTAS_HOST}/api/alertas/evaluar", timeout=10)
-        alertas = requests.get(f"{ALERTAS_HOST}/api/alertas/", params={"limite": 100}, timeout=10).json()
-        DATOS["alertas"] = [a["id"] for a in alertas["items"]]
-
-        print(f"[datos de prueba] alertas={len(DATOS['alertas'])} temporada={DATOS['temporada']}")
-    except Exception as exc:  # noqa: BLE001
-        print(f"[ADVERTENCIA] No se pudieron preparar los datos de prueba: {exc}")
+def _sin_datos(nombre):
+    """Registra un fallo explícito cuando no hay alertas de prueba."""
+    events.request.fire(
+        request_type="DATOS",
+        name=nombre,
+        response_time=0,
+        response_length=0,
+        exception=RuntimeError("Sin alertas de prueba"),
+        context={},
+    )
 
 
 def _verificar(response, codigos_ok, validar=None):
@@ -103,7 +138,7 @@ def _verificar(response, codigos_ok, validar=None):
 
 
 def _id_alerta():
-    return random.choice(DATOS["alertas"] or [1])
+    return random.choice(DATOS["alertas"]) if DATOS["alertas"] else None
 
 
 def _rango_mes():
@@ -161,6 +196,9 @@ class AlertasUser(HttpUser):
         """A03: GET /api/alertas/{id} - existentes (200) e inexistentes (404)."""
         if random.random() < 0.8:
             esperado, alerta_id = 200, _id_alerta()
+            if alerta_id is None:
+                _sin_datos("[A03] sin alertas de prueba")
+                return
         else:
             esperado, alerta_id = 404, 99999999
 
@@ -178,6 +216,9 @@ class AlertasUser(HttpUser):
     def a04_cambio_estado(self):
         """A04: PATCH /api/alertas/{id}/estado - el estado queda actualizado."""
         alerta_id = _id_alerta()
+        if alerta_id is None:
+            _sin_datos("[A04/15] sin alertas de prueba")
+            return
         estado = random.choice(("pendiente", "en_gestion"))
         usuario = random.randint(1, 50)
 
@@ -276,12 +317,16 @@ class AlertasUser(HttpUser):
     @tag("A08", "A15")
     @task
     def a08_creacion_umbrales(self):
-        """A08: POST /api/alertas/umbrales - válidos (201) e inválidos (400), sin duplicados."""
+        """A08: POST /api/alertas/umbrales - válidos (201) e inválidos (400), sin duplicados.
+
+        Los umbrales se crean inactivos para que no afecten a POST /evaluar ni a otras pruebas.
+        """
         if random.random() < 0.2:
-            cuerpo, esperado = {"producto_id": 900000, "stock_minimo": -1}, 400
+            cuerpo, esperado = {"producto_id": 900000, "stock_minimo": -1, "activo": False}, 400
         else:
             producto_id = 900000 + uuid.uuid4().int % 1000000
-            cuerpo, esperado = {"producto_id": producto_id, "stock_minimo": random.randint(0, 50)}, 201
+            cuerpo = {"producto_id": producto_id, "stock_minimo": random.randint(0, 50), "activo": False}
+            esperado = 201
 
         with self.client.post(
             "/api/alertas/umbrales", json=cuerpo, name="[A08/15] POST /api/alertas/umbrales", catch_response=True
@@ -291,7 +336,11 @@ class AlertasUser(HttpUser):
                 return
             if esperado == 201:
                 umbral = r.json()
-                if umbral["producto_id"] != cuerpo["producto_id"] or umbral["stock_minimo"] != cuerpo["stock_minimo"]:
+                if (
+                    umbral["producto_id"] != cuerpo["producto_id"]
+                    or umbral["stock_minimo"] != cuerpo["stock_minimo"]
+                    or umbral["activo"] is not False
+                ):
                     r.failure("El umbral creado no coincide con los datos enviados")
                     return
                 if umbral["id"] in UMBRALES_CREADOS:
